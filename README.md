@@ -2,8 +2,6 @@
 
 Browser extension for `ani.gamer.com.tw` that adds a yearly heatmap above the watch history page.
 
-The content script automatically clicks the page's own "show more" control until the watch history is fully loaded, then reads the existing hidden DOM data.
-
 Hovering a heatmap day shows the watched titles, episode labels, and watch times for that day.
 
 ![Heatmap screenshot](assets/screenshot.png)
