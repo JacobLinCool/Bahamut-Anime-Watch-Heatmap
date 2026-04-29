@@ -4,6 +4,8 @@ Browser extension for `ani.gamer.com.tw` that adds a yearly heatmap above the wa
 
 Hovering a heatmap day shows the watched titles, episode labels, and watch times for that day.
 
+Privacy policy: [PRIVACY.md](./PRIVACY.md)
+
 ![Heatmap screenshot](assets/screenshot.png)
 
 ## Development

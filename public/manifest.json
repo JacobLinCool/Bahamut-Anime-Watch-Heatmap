@@ -15,6 +15,5 @@
       "js": ["assets/content.js"],
       "run_at": "document_idle"
     }
-  ],
-  "host_permissions": ["https://ani.gamer.com.tw/*"]
+  ]
 }
