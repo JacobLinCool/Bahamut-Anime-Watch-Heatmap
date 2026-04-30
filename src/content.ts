@@ -23,6 +23,7 @@ const css = `
   box-sizing: border-box;
   width: 100%;
   margin: 18px 0 24px;
+  padding: 0;
   color: #1f2937;
   font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
