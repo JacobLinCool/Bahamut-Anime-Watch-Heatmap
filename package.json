@@ -1,19 +1,22 @@
 {
   "name": "ani-gamer-heatmap",
-  "version": "0.1.0",
-  "description": "A browser extension that adds a watch history heatmap to Bahamut Anime.",
+  "version": "0.2.0",
+  "description": "A browser extension for Bahamut Anime watch heatmaps, seasonal analysis, and personal recaps.",
   "type": "module",
   "private": true,
   "scripts": {
     "assets:store": "node scripts/create-icons.mjs && node scripts/prepare-store-assets.mjs",
-    "build": "vite build",
-    "package": "pnpm typecheck && pnpm build && node scripts/package-extension.mjs",
+    "build": "vite build && vite build --config vite.background.config.ts",
+    "package": "pnpm typecheck && pnpm test && pnpm build && node scripts/package-extension.mjs",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "ani-gamer",
+    "analytics",
     "browser-extension",
     "heatmap",
+    "personal-recap",
     "typescript"
   ],
   "author": "JacobLinCool <jacoblincool@gmail.com> (https://github.com/JacobLinCool)",
@@ -23,6 +26,7 @@
     "@types/chrome": "^0.0.326",
     "@types/node": "^25.0.3",
     "typescript": "^5.9.3",
-    "vite": "^7.2.7"
+    "vite": "^7.2.7",
+    "vitest": "^4.1.0"
   }
 }

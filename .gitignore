@@ -113,6 +113,10 @@ dist
 # Browser extension release artifacts
 release/
 
+# Local browser verification artifacts
+output/playwright/
+.playwright-cli/
+
 # Docusaurus cache and generated files
 .docusaurus
 
