@@ -142,3 +142,4 @@ output/playwright/
 .yarn/install-state.gz
 .pnp.*
 .DS_Store
+.render-harness/

@@ -1,5 +1,10 @@
 import { dashboardCss, renderDashboard } from "./analysis-dashboard";
-import { formatHalfOpenRange } from "./analysis-format";
+import {
+  formatCompactDuration,
+  formatDuration,
+  formatHalfOpenRange,
+  formatInteger
+} from "./analysis-format";
 import { analyzeWatchHistory, type AnalyticsResult, type HistoryCoverage } from "./analytics";
 import { ANALYSIS_OVERLAY_ID, ANALYSIS_TRIGGER_ID } from "./heatmap-view";
 import { MAX_METADATA_REQUESTS_PER_SECOND } from "./metadata";
@@ -74,6 +79,13 @@ export class AnalysisView {
   #cacheButton: HTMLButtonElement | undefined;
   #debugButton: HTMLButtonElement | undefined;
   #cacheFeedback: HTMLElement | undefined;
+  #settingsButton: HTMLButtonElement | undefined;
+  #settingsPopover: HTMLElement | undefined;
+  #settingsOpen = false;
+  #isClosing = false;
+  #pendingReveal = false;
+  #renderedSurface: "dashboard" | "recap" | undefined;
+  #countUpFrames: number[] = [];
   #isClearingMetadataCache = false;
   #isDownloadingDebugData = false;
   #opener: HTMLElement | undefined;
@@ -98,7 +110,7 @@ export class AnalysisView {
 
   update(state: AnalysisViewState): void {
     this.#state = state;
-    if (!this.isOpen) return;
+    if (!this.isOpen || this.#isClosing) return;
     this.#syncScopeOptions();
     this.#syncCacheButton();
     this.#syncMetadataProgress();
@@ -106,13 +118,16 @@ export class AnalysisView {
   }
 
   open(): void {
-    if (this.#host && !this.#host.isConnected) this.close({ restoreFocus: false });
+    if (this.#isClosing) this.#finalizeClose({ restoreFocus: false });
+    if (this.#host && !this.#host.isConnected) this.#finalizeClose({ restoreFocus: false });
     if (this.isOpen) {
       this.#heading?.focus();
       return;
     }
 
     this.#opener = deepestActiveElement();
+    this.#pendingReveal = true;
+    this.#renderedSurface = undefined;
     this.#uiState = reduceRecapUiState<RecapPresentationDeck>(
       initialRecapUiState,
       { type: "OPEN", surface: "dashboard" }
@@ -150,10 +165,21 @@ export class AnalysisView {
       this.#surfaceButton("recap", "期間回顧")
     );
 
+    const tools = element("div", "ani-analysis-tools");
+    const settingsButton = createButton("ani-analysis-settings-button", "⋯");
+    settingsButton.setAttribute("aria-label", "資料與除錯設定");
+    settingsButton.setAttribute("aria-haspopup", "true");
+    settingsButton.setAttribute("aria-expanded", "false");
+    settingsButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.#toggleSettings();
+    });
     const closeButton = createButton("ani-analysis-close", "×");
     closeButton.setAttribute("aria-label", "關閉我的觀看誌");
     closeButton.addEventListener("click", () => this.close());
-    headerInner.append(brand, surfaceNav, closeButton);
+    tools.append(settingsButton, closeButton);
+    headerInner.append(brand, surfaceNav, tools);
+
     const metadataProgress = element("section", "ani-analysis-metadata-progress");
     metadataProgress.hidden = true;
     metadataProgress.setAttribute("aria-label", "完整分析載入進度");
@@ -164,7 +190,27 @@ export class AnalysisView {
     const metadataProgressBar = element("progress", "ani-analysis-metadata-progress-bar");
     metadataProgressBar.setAttribute("aria-label", "作品資料整理進度");
     metadataProgress.append(metadataProgressHeader, metadataProgressBar);
-    header.append(headerInner, metadataProgress);
+
+    const settingsPopover = element("div", "ani-analysis-settings-popover");
+    settingsPopover.hidden = true;
+    settingsPopover.setAttribute("role", "group");
+    settingsPopover.setAttribute("aria-label", "資料與除錯");
+    const debugButton = createButton("ani-analysis-debug-button", "下載除錯資料");
+    debugButton.setAttribute("aria-describedby", CACHE_FEEDBACK_ID);
+    debugButton.addEventListener("click", () => void this.#downloadDebugData());
+    const cacheButton = createButton("ani-analysis-cache-button", "清除作品資料快取");
+    cacheButton.setAttribute("aria-describedby", CACHE_FEEDBACK_ID);
+    cacheButton.addEventListener("click", () => void this.#clearMetadataCache());
+    const cacheFeedback = element("div", "ani-analysis-cache-feedback");
+    cacheFeedback.id = CACHE_FEEDBACK_ID;
+    cacheFeedback.hidden = true;
+    settingsPopover.append(
+      textElement("p", "ani-analysis-settings-title", "資料與除錯"),
+      debugButton,
+      cacheButton,
+      cacheFeedback
+    );
+    header.append(headerInner, metadataProgress, settingsPopover);
 
     const controls = element("section", "ani-analysis-controls");
     controls.setAttribute("aria-label", "分析範圍");
@@ -187,23 +233,13 @@ export class AnalysisView {
       if (!scope) return;
       this.#selectedScopeKey = select.value;
       this.#selectedPeriodIdentity = periodIdentity(scope.period);
+      this.#pendingReveal = true;
       this.#render();
     });
     periodField.append(periodLabel, select);
 
     const periodDescription = element("div", "ani-analysis-period-description");
-    const cacheArea = element("div", "ani-analysis-cache-area");
-    const debugButton = createButton("ani-analysis-debug-button", "下載除錯資料");
-    debugButton.setAttribute("aria-describedby", CACHE_FEEDBACK_ID);
-    debugButton.addEventListener("click", () => void this.#downloadDebugData());
-    const cacheButton = createButton("ani-analysis-cache-button", "清除作品資料快取");
-    cacheButton.setAttribute("aria-describedby", CACHE_FEEDBACK_ID);
-    cacheButton.addEventListener("click", () => void this.#clearMetadataCache());
-    const cacheFeedback = element("div", "ani-analysis-cache-feedback");
-    cacheFeedback.id = CACHE_FEEDBACK_ID;
-    cacheFeedback.hidden = true;
-    cacheArea.append(debugButton, cacheButton, cacheFeedback);
-    controlsInner.append(axisControl, periodField, periodDescription, cacheArea);
+    controlsInner.append(axisControl, periodField, periodDescription);
     controls.append(controlsInner);
 
     const main = element("main", "ani-analysis-main");
@@ -233,8 +269,11 @@ export class AnalysisView {
     this.#cacheButton = cacheButton;
     this.#debugButton = debugButton;
     this.#cacheFeedback = cacheFeedback;
+    this.#settingsButton = settingsButton;
+    this.#settingsPopover = settingsPopover;
 
     overlay.addEventListener("keydown", this.#handleKeydown);
+    overlay.addEventListener("click", this.#handleOverlayClick);
     document.body.append(host);
     this.#lockBackground();
     this.#syncScopeOptions();
@@ -245,11 +284,44 @@ export class AnalysisView {
   }
 
   close(options: { readonly restoreFocus?: boolean } = {}): void {
+    if (!this.#host || this.#isClosing) return;
+    const overlay = this.#overlay;
+    const shell = this.#shell;
+    if (prefersReducedMotion() || !overlay || !shell) {
+      this.#finalizeClose(options);
+      return;
+    }
+
+    this.#isClosing = true;
+    this.#closeSettings();
+    overlay.dataset.phase = "leaving";
+    let settled = false;
+    const finalize = (): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      shell.removeEventListener("animationend", onAnimationEnd);
+      this.#finalizeClose(options);
+    };
+    // animationend bubbles from descendants; only the shell's own exit animation ends the close.
+    const onAnimationEnd = (event: AnimationEvent): void => {
+      if (event.target === shell) finalize();
+    };
+    const timer = window.setTimeout(finalize, 420);
+    shell.addEventListener("animationend", onAnimationEnd);
+  }
+
+  #finalizeClose(options: { readonly restoreFocus?: boolean } = {}): void {
     if (!this.#host) return;
+    this.#isClosing = false;
+    this.#settingsOpen = false;
+    for (const id of this.#countUpFrames) cancelAnimationFrame(id);
+    this.#countUpFrames = [];
     this.#uiState = reduceRecapUiState<RecapPresentationDeck>(this.#uiState, { type: "CLOSE" });
     this.#backgroundObserver?.disconnect();
     this.#backgroundObserver = undefined;
     this.#overlay?.removeEventListener("keydown", this.#handleKeydown);
+    this.#overlay?.removeEventListener("click", this.#handleOverlayClick);
     for (const [node, wasInert] of this.#inertBeforeOpen) node.inert = wasInert;
     this.#inertBeforeOpen.clear();
     restoreStyleProperty(document.body.style, "overflow", this.#priorBodyOverflow, this.#priorBodyOverflowPriority);
@@ -273,6 +345,9 @@ export class AnalysisView {
     this.#cacheButton = undefined;
     this.#debugButton = undefined;
     this.#cacheFeedback = undefined;
+    this.#settingsButton = undefined;
+    this.#settingsPopover = undefined;
+    this.#renderedSurface = undefined;
     this.#scopeSignature = "";
     this.#lastAnnouncement = "";
     this.#renderedFocusViewKey = "";
@@ -285,7 +360,8 @@ export class AnalysisView {
   }
 
   destroy(): void {
-    this.close({ restoreFocus: false });
+    this.#isClosing = false;
+    this.#finalizeClose({ restoreFocus: false });
     this.#state = undefined;
   }
 
@@ -305,6 +381,7 @@ export class AnalysisView {
       if (this.#selectedAxis === axis) return;
       this.#selectedAxis = axis;
       this.#scopeSignature = "";
+      this.#pendingReveal = true;
       this.#syncScopeOptions();
       this.#render();
     });
@@ -314,12 +391,50 @@ export class AnalysisView {
   #dispatch(event: RecapUiEvent<RecapPresentationDeck>): void {
     const next = reduceRecapUiState<RecapPresentationDeck>(this.#uiState, event);
     if (next === this.#uiState) return;
+    if (next.kind === "dashboard") this.#pendingReveal = true;
     this.#pendingFocusKey = postRecapDispatchFocusKey(this.#uiState, event, next);
     this.#uiState = next;
     this.#render();
   }
 
+  #toggleSettings(): void {
+    if (this.#settingsOpen) this.#closeSettings();
+    else this.#openSettings();
+  }
+
+  #openSettings(): void {
+    if (!this.#settingsPopover || !this.#settingsButton || this.#settingsOpen) return;
+    this.#settingsOpen = true;
+    this.#settingsPopover.hidden = false;
+    this.#settingsButton.setAttribute("aria-expanded", "true");
+  }
+
+  #closeSettings(): void {
+    if (!this.#settingsOpen) return;
+    this.#settingsOpen = false;
+    if (this.#settingsPopover) this.#settingsPopover.hidden = true;
+    this.#settingsButton?.setAttribute("aria-expanded", "false");
+  }
+
+  readonly #handleOverlayClick = (event: MouseEvent): void => {
+    if (!this.#settingsOpen) return;
+    const target = event.target;
+    if (target instanceof Node && (
+      this.#settingsPopover?.contains(target) === true
+      || this.#settingsButton?.contains(target) === true
+    )) return;
+    this.#closeSettings();
+  };
+
   readonly #handleKeydown = (event: KeyboardEvent): void => {
+    if (this.#isClosing) return;
+    if (event.key === "Escape" && this.#settingsOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.#closeSettings();
+      this.#settingsButton?.focus();
+      return;
+    }
     if (handleAnalysisEscapeKey(
       event,
       this.#uiState.kind === "recap-evidence",
@@ -366,7 +481,7 @@ export class AnalysisView {
     }
     this.#backgroundObserver = new MutationObserver((mutations) => {
       if (this.#host && !this.#host.isConnected) {
-        this.close({ restoreFocus: false });
+        this.#finalizeClose({ restoreFocus: false });
         return;
       }
       for (const mutation of mutations) {
@@ -407,6 +522,7 @@ export class AnalysisView {
   }
 
   #syncAxisButtons(): void {
+    if (this.#axisControl) this.#axisControl.dataset.active = this.#selectedAxis;
     for (const node of this.#axisControl?.querySelectorAll<HTMLButtonElement>("[data-axis]") ?? []) {
       const selected = node.dataset.axis === this.#selectedAxis;
       node.setAttribute("aria-pressed", String(selected));
@@ -415,6 +531,7 @@ export class AnalysisView {
 
   #syncSurfaceButtons(): void {
     const surface = this.#uiState.kind === "dashboard" ? "dashboard" : "recap";
+    if (this.#surfaceNav) this.#surfaceNav.dataset.active = surface;
     for (const node of this.#surfaceNav?.querySelectorAll<HTMLButtonElement>("[data-surface]") ?? []) {
       const selected = node.dataset.surface === surface;
       node.setAttribute("aria-current", selected ? "page" : "false");
@@ -533,9 +650,12 @@ export class AnalysisView {
     const main = this.#main;
     const shell = this.#shell;
     if (!state || !main || !shell) return;
+    for (const id of this.#countUpFrames) cancelAnimationFrame(id);
+    this.#countUpFrames = [];
     const priorFocus = captureSemanticFocus(main);
     const focusViewKey = analysisFocusViewKey(this.#uiState);
-    const focusViewChanged = focusViewKey !== this.#renderedFocusViewKey;
+    const previousFocusViewKey = this.#renderedFocusViewKey;
+    const focusViewChanged = focusViewKey !== previousFocusViewKey;
     this.#renderedFocusViewKey = focusViewKey;
     this.#syncSurfaceButtons();
     const playing = isRecapPlayback(this.#uiState);
@@ -599,15 +719,22 @@ export class AnalysisView {
     }
 
     if (this.#uiState.kind === "dashboard") {
-      main.replaceChildren(renderDashboard({
+      const reveal = this.#pendingReveal && !prefersReducedMotion();
+      this.#pendingReveal = false;
+      const dashboard = renderDashboard({
         result,
-        onOpenRecap: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "recap" })
-      }));
+        onOpenRecap: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "recap" }),
+        reveal
+      });
+      this.#applySurfaceEnter(dashboard, "dashboard");
+      main.replaceChildren(dashboard);
+      if (reveal) this.#runCountUp(main);
+      this.#renderedSurface = "dashboard";
       this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
       return;
     }
 
-    main.replaceChildren(renderRecapSurface({
+    const recap = renderRecapSurface({
       state: this.#uiState,
       result,
       onStart: () => this.#dispatch({ type: "START_RECAP", deck: buildRecapDeck(result) }),
@@ -618,8 +745,56 @@ export class AnalysisView {
       onRestart: () => this.#dispatch({ type: "RESTART" }),
       onDashboard: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "dashboard" }),
       onAnimationFinished: () => this.#dispatch({ type: "ANIMATION_FINISHED" })
-    }));
+    });
+    this.#applySurfaceEnter(recap, "recap");
+    main.replaceChildren(recap);
+    // Chapter and intro numerals count up once per view; skip evidence round-trips,
+    // which re-render the same chapter underneath the closing panel.
+    if (
+      focusViewChanged
+      && this.#uiState.kind !== "recap-evidence"
+      && !previousFocusViewKey.startsWith("recap-evidence")
+    ) this.#runCountUp(main);
+    this.#renderedSurface = "recap";
     this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
+  }
+
+  #applySurfaceEnter(root: HTMLElement, surface: "dashboard" | "recap"): void {
+    if (prefersReducedMotion()) return;
+    // The dashboard's own reveal stagger is its entrance; only the recap surface,
+    // which has no per-item reveal, needs a whole-surface "dim the lights" transition.
+    if (surface === "recap" && this.#renderedSurface && this.#renderedSurface !== surface) {
+      root.dataset.surfaceEnter = surface;
+    }
+  }
+
+  #runCountUp(main: HTMLElement): void {
+    for (const id of this.#countUpFrames) cancelAnimationFrame(id);
+    this.#countUpFrames = [];
+    if (prefersReducedMotion()) return;
+    for (const node of main.querySelectorAll<HTMLElement>("[data-count-to]")) {
+      const target = Number(node.dataset.countTo);
+      if (Number.isFinite(target)) this.#animateCountUp(node, target);
+    }
+  }
+
+  #animateCountUp(node: HTMLElement, target: number): void {
+    const format = countUpFormatter(node.dataset.countFormat);
+    if (target <= 0) {
+      node.textContent = format(target);
+      return;
+    }
+    node.textContent = format(0);
+    const duration = 720;
+    let startTs: number | undefined;
+    const step = (ts: number): void => {
+      startTs ??= ts;
+      const progress = Math.min(1, (ts - startTs) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      node.textContent = format(Math.round(target * eased));
+      if (progress < 1) this.#countUpFrames.push(requestAnimationFrame(step));
+    };
+    this.#countUpFrames.push(requestAnimationFrame(step));
   }
 
   #restoreFocusAfterRender(
@@ -914,6 +1089,18 @@ export const selectAnalysisFocusRestoreTarget = <T extends { readonly isConnecte
   bridge: T | null | undefined
 ): T | undefined => opener?.isConnected ? opener : bridge?.isConnected ? bridge : undefined;
 
+const countUpFormatter = (format: string | undefined): (value: number) => string => {
+  switch (format) {
+    case "duration": return formatDuration;
+    case "compact-duration": return formatCompactDuration;
+    default: return formatInteger;
+  }
+};
+
+const prefersReducedMotion = (): boolean => typeof window !== "undefined"
+  && typeof window.matchMedia === "function"
+  && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 const deepestActiveElement = (): HTMLElement | undefined => {
   let active: Element | null = document.activeElement;
   while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
@@ -968,6 +1155,37 @@ export const analysisCss = `
   isolation: isolate !important;
   direction: ltr !important;
   color-scheme: light !important;
+  --ani-bg: #f4f6fb;
+  --ani-surface: #ffffff;
+  --ani-surface-sunken: #f5f8fc;
+  --ani-surface-veil: rgba(249, 251, 253, .84);
+  --ani-line: #e5e9f0;
+  --ani-line-strong: #cbd5e1;
+  --ani-ink: #0d1526;
+  --ani-ink-2: #46536b;
+  --ani-ink-3: #6b7688;
+  --ani-ink-4: #97a1b3;
+  --ani-accent: #0284c7;
+  --ani-accent-bright: #0ea5e9;
+  --ani-accent-ink: #075985;
+  --ani-accent-tint: #e0f2fe;
+  --ani-hot: #f97316;
+  --ani-hot-ink: #c2410c;
+  --ani-hot-tint: #fff1e6;
+  --ani-brand: linear-gradient(135deg, #0d1526 0%, #172554 52%, #0e4b57 100%);
+  --ani-r-sm: 10px;
+  --ani-r-md: 14px;
+  --ani-r-lg: 20px;
+  --ani-r-pill: 999px;
+  --ani-shadow-1: 0 1px 2px rgba(15, 23, 42, .04), 0 10px 24px rgba(15, 23, 42, .06);
+  --ani-shadow-2: 0 2px 6px rgba(15, 23, 42, .06), 0 18px 42px rgba(15, 23, 42, .1);
+  --ani-shadow-3: 0 14px 38px rgba(15, 23, 42, .18);
+  --ani-ease: cubic-bezier(.2, .8, .2, 1);
+  --ani-ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ani-dur-1: 140ms;
+  --ani-dur-2: 240ms;
+  --ani-dur-3: 380ms;
+  --ani-dur-4: 520ms;
 }
 :host::before,
 :host::after { content: none !important; display: none !important; }
@@ -983,69 +1201,85 @@ export const analysisCss = `
   min-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  background: #f3f6fa;
-  color: #0f172a;
+  background: var(--ani-bg);
+  color: var(--ani-ink);
   font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
   text-align: left;
+  animation: ani-analysis-overlay-in var(--ani-dur-3) var(--ani-ease) both;
 }
-.ani-analysis-shell { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 100dvh; }
+.ani-analysis-overlay[data-phase="leaving"] { animation: ani-analysis-overlay-out var(--ani-dur-2) var(--ani-ease) both; }
+.ani-analysis-shell { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 100dvh; animation: ani-analysis-shell-in var(--ani-dur-3) var(--ani-ease-out) both; }
+.ani-analysis-overlay[data-phase="leaving"] .ani-analysis-shell { animation: ani-analysis-shell-out var(--ani-dur-2) var(--ani-ease) both; }
 .ani-analysis-shell[data-playback="true"] { grid-template-rows: auto minmax(0, 1fr); }
-.ani-analysis-header { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid rgba(203, 213, 225, .8); background: rgba(248, 250, 252, .9); padding: max(12px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 12px max(18px, env(safe-area-inset-left)); backdrop-filter: blur(18px); }
+.ani-analysis-header { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--ani-line); background: var(--ani-surface-veil); padding: max(12px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 12px max(18px, env(safe-area-inset-left)); backdrop-filter: blur(18px); }
 .ani-analysis-header-inner, .ani-analysis-controls-inner, .ani-analysis-main { width: min(100%, 1120px); margin-inline: auto; }
-.ani-analysis-header-inner { display: grid; grid-template-columns: minmax(0, 1fr) max-content 42px; align-items: center; gap: 18px; }
+.ani-analysis-header-inner { display: grid; grid-template-columns: minmax(0, 1fr) max-content max-content; align-items: center; gap: 16px; }
 .ani-analysis-brand { min-width: 0; }
-.ani-analysis-title { margin: 0; color: #0f172a; font-size: clamp(19px, 2vw, 24px); font-weight: 900; letter-spacing: -.03em; line-height: 1.2; }
+.ani-analysis-title { margin: 0; color: var(--ani-ink); font-size: clamp(19px, 2vw, 24px); font-weight: 900; letter-spacing: -.03em; line-height: 1.2; }
 .ani-analysis-title:focus { outline: none; }
-.ani-analysis-subtitle { overflow: hidden; margin: 3px 0 0; color: #64748b; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.ani-analysis-metadata-progress { display: grid; gap: 6px; width: min(100%, 1120px); margin: 10px auto 0; }
+.ani-analysis-subtitle { overflow: hidden; margin: 3px 0 0; color: var(--ani-ink-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ani-analysis-tools { display: inline-flex; align-items: center; gap: 8px; }
+.ani-analysis-metadata-progress { display: grid; gap: 6px; width: min(100%, 1120px); margin: 12px auto 2px; }
 .ani-analysis-metadata-progress[hidden] { display: none; }
-.ani-analysis-metadata-progress-header { display: flex; justify-content: space-between; gap: 16px; color: #334155; font-size: 10px; }
-.ani-analysis-metadata-progress-header strong { color: #0f172a; font-size: 11px; }
-.ani-analysis-metadata-progress-bar { appearance: none; display: block; width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 999px; background: #dbe3ec; }
-.ani-analysis-metadata-progress-bar::-webkit-progress-bar { border-radius: 999px; background: #dbe3ec; }
-.ani-analysis-metadata-progress-bar::-webkit-progress-value { border-radius: 999px; background: linear-gradient(90deg, #38bdf8, #0284c7); transition: width 180ms ease-out; }
-.ani-analysis-metadata-progress-bar::-moz-progress-bar { border-radius: 999px; background: linear-gradient(90deg, #38bdf8, #0284c7); }
-.ani-analysis-surface-nav, .ani-analysis-axis-control { display: inline-flex; align-items: center; border: 1px solid #dbe3ec; border-radius: 999px; background: #e9eef5; padding: 3px; }
-.ani-analysis-surface-button, .ani-analysis-axis-button { min-height: 32px; border: 0; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font: inherit; font-size: 12px; font-weight: 850; padding: 6px 13px; }
-.ani-analysis-surface-button[aria-current="page"], .ani-analysis-axis-button[aria-pressed="true"] { background: #fff; color: #0f172a; box-shadow: 0 2px 8px rgba(15, 23, 42, .1); }
-.ani-analysis-close { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid #cbd5e1; border-radius: 50%; background: #fff; color: #0f172a; cursor: pointer; font: inherit; font-size: 25px; line-height: 1; }
-.ani-analysis-controls { border-bottom: 1px solid rgba(203, 213, 225, .7); background: rgba(243, 246, 250, .94); padding: 10px max(18px, env(safe-area-inset-right)) 10px max(18px, env(safe-area-inset-left)); }
-.ani-analysis-controls[hidden] { display: none; }
-.ani-analysis-controls-inner { display: grid; grid-template-columns: max-content minmax(190px, 280px) minmax(0, 1fr) max-content; align-items: center; gap: 10px 14px; }
-.ani-analysis-period-field { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; }
-.ani-analysis-period-label { color: #475569; font-size: 11px; font-weight: 900; }
-.ani-analysis-select { width: 100%; min-height: 38px; border: 1px solid #94a3b8; border-radius: 10px; background: #fff; color: #0f172a; font: inherit; font-size: 12px; padding: 7px 30px 7px 10px; }
-.ani-analysis-period-description { min-width: 0; color: #64748b; font-size: 10px; line-height: 1.45; }
-.ani-analysis-cache-area { position: relative; display: flex; align-items: center; gap: 7px; }
-.ani-analysis-cache-button, .ani-analysis-debug-button { min-height: 36px; border: 1px solid #cbd5e1; border-radius: 999px; background: #fff; color: #475569; cursor: pointer; font: inherit; font-size: 10px; font-weight: 850; padding: 7px 12px; white-space: nowrap; }
-.ani-analysis-debug-button { border-color: #94a3b8; color: #334155; }
+.ani-analysis-metadata-progress-header { display: flex; justify-content: space-between; gap: 16px; color: var(--ani-ink-2); font-size: 10px; }
+.ani-analysis-metadata-progress-header strong { color: var(--ani-ink); font-size: 11px; font-weight: 800; }
+.ani-analysis-metadata-progress-bar { appearance: none; display: block; width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: var(--ani-r-pill); background: #dbe3ec; }
+.ani-analysis-metadata-progress-bar::-webkit-progress-bar { border-radius: var(--ani-r-pill); background: #dbe3ec; }
+.ani-analysis-metadata-progress-bar::-webkit-progress-value { border-radius: var(--ani-r-pill); background: linear-gradient(90deg, var(--ani-accent-bright), var(--ani-accent)); transition: width 180ms var(--ani-ease-out); }
+.ani-analysis-metadata-progress-bar::-moz-progress-bar { border-radius: var(--ani-r-pill); background: linear-gradient(90deg, var(--ani-accent-bright), var(--ani-accent)); }
+.ani-analysis-surface-nav, .ani-analysis-axis-control { position: relative; display: grid; grid-template-columns: 1fr 1fr; align-items: center; border: 1px solid var(--ani-line); border-radius: var(--ani-r-pill); background: #e7edf4; padding: 3px; }
+.ani-analysis-surface-nav { width: 200px; }
+.ani-analysis-axis-control { width: 236px; justify-self: end; }
+.ani-analysis-surface-nav::before, .ani-analysis-axis-control::before { content: ""; position: absolute; z-index: 0; inset: 3px auto 3px 3px; width: calc(50% - 3px); border-radius: var(--ani-r-pill); background: var(--ani-surface); box-shadow: 0 2px 8px rgba(15, 23, 42, .12); transition: transform var(--ani-dur-2) var(--ani-ease); }
+.ani-analysis-surface-nav[data-active="recap"]::before, .ani-analysis-axis-control[data-active="released-at"]::before { transform: translateX(100%); }
+.ani-analysis-surface-button, .ani-analysis-axis-button { position: relative; z-index: 1; min-height: 32px; border: 0; border-radius: var(--ani-r-pill); background: transparent; color: var(--ani-ink-3); cursor: pointer; font: inherit; font-size: 12px; font-weight: 850; padding: 6px 10px; text-align: center; white-space: nowrap; transition: color var(--ani-dur-1) var(--ani-ease); }
+.ani-analysis-surface-button[aria-current="page"], .ani-analysis-axis-button[aria-pressed="true"] { color: var(--ani-ink); }
+.ani-analysis-settings-button, .ani-analysis-close { display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--ani-line-strong); border-radius: 50%; background: var(--ani-surface); color: var(--ani-ink); cursor: pointer; font: inherit; line-height: 1; padding: 0; transition: background var(--ani-dur-1) var(--ani-ease), color var(--ani-dur-1) var(--ani-ease), border-color var(--ani-dur-1) var(--ani-ease); }
+.ani-analysis-settings-button { color: var(--ani-ink-2); font-size: 22px; }
+.ani-analysis-close { font-size: 24px; }
+.ani-analysis-settings-button:hover, .ani-analysis-close:hover { background: var(--ani-surface-sunken); color: var(--ani-ink); }
+.ani-analysis-settings-button[aria-expanded="true"] { background: var(--ani-accent-tint); border-color: var(--ani-accent-bright); color: var(--ani-accent-ink); }
+.ani-analysis-settings-popover { position: absolute; z-index: 30; top: calc(100% - 4px); right: max(18px, env(safe-area-inset-right)); display: grid; gap: 8px; width: min(300px, calc(100vw - 32px)); border: 1px solid var(--ani-line); border-radius: var(--ani-r-md); background: var(--ani-surface); box-shadow: var(--ani-shadow-3); padding: 14px; animation: ani-pop-in var(--ani-dur-2) var(--ani-ease-out) both; }
+.ani-analysis-settings-popover[hidden] { display: none; }
+.ani-analysis-settings-title { margin: 0 0 2px; color: var(--ani-ink-3); font-size: 10px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+.ani-analysis-cache-button, .ani-analysis-debug-button { min-height: 38px; border: 1px solid var(--ani-line-strong); border-radius: var(--ani-r-sm); background: var(--ani-surface); color: var(--ani-ink-2); cursor: pointer; font: inherit; font-size: 12px; font-weight: 800; padding: 8px 12px; text-align: left; transition: background var(--ani-dur-1) var(--ani-ease); }
+.ani-analysis-cache-button:hover, .ani-analysis-debug-button:hover { background: var(--ani-surface-sunken); }
 .ani-analysis-cache-button:disabled, .ani-analysis-debug-button:disabled { cursor: not-allowed; opacity: .58; }
-.ani-analysis-cache-feedback { position: absolute; top: calc(100% + 8px); right: 0; z-index: 10; width: min(320px, 80vw); border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px rgba(15, 23, 42, .15); color: #475569; font-size: 10px; padding: 9px 11px; }
-.ani-analysis-cache-feedback[data-tone="error"] { border-color: #fecaca; color: #b91c1c; }
-.ani-analysis-main { display: grid; padding: 24px 20px max(54px, env(safe-area-inset-bottom)); }
-.ani-analysis-main--recap { width: 100%; min-height: 0; padding: 0; }
-.ani-analysis-status-panel { display: grid; place-items: center; align-content: center; min-height: 52vh; border: 1px solid #e2e8f0; border-radius: 20px; background: #fff; padding: 32px; text-align: center; }
-.ani-analysis-status-title { margin: 0; color: #0f172a; font-size: 22px; }
-.ani-analysis-status-copy { max-width: 560px; margin: 8px 0 0; color: #64748b; font-size: 13px; }
+.ani-analysis-cache-feedback { border: 1px solid var(--ani-line); border-radius: var(--ani-r-sm); background: var(--ani-surface-sunken); color: var(--ani-ink-2); font-size: 11px; line-height: 1.5; padding: 9px 11px; }
+.ani-analysis-cache-feedback[data-tone="error"] { border-color: #fecaca; background: #fff5f5; color: #b91c1c; }
+.ani-analysis-controls { border-bottom: 1px solid var(--ani-line); background: var(--ani-surface-veil); padding: 12px max(18px, env(safe-area-inset-right)) 12px max(18px, env(safe-area-inset-left)); }
+.ani-analysis-controls[hidden] { display: none; }
+.ani-analysis-controls-inner { display: grid; grid-template-columns: max-content minmax(200px, 300px) minmax(0, 1fr); align-items: center; gap: 10px 16px; }
+.ani-analysis-period-field { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; }
+.ani-analysis-period-label { color: var(--ani-ink-2); font-size: 11px; font-weight: 900; }
+.ani-analysis-select { width: 100%; min-height: 38px; border: 1px solid var(--ani-line-strong); border-radius: var(--ani-r-sm); background: var(--ani-surface); color: var(--ani-ink); font: inherit; font-size: 12px; padding: 7px 30px 7px 12px; cursor: pointer; }
+.ani-analysis-period-description { min-width: 0; color: var(--ani-ink-3); font-size: 10px; line-height: 1.45; }
+.ani-analysis-main { display: grid; padding: 26px 20px max(54px, env(safe-area-inset-bottom)); }
+.ani-analysis-main--recap { width: 100%; min-height: 0; padding: 0; background: #060a14; }
+.ani-analysis-status-panel { display: grid; place-items: center; align-content: center; min-height: 52vh; border: 1px solid var(--ani-line); border-radius: var(--ani-r-lg); background: var(--ani-surface); box-shadow: var(--ani-shadow-1); padding: 32px; text-align: center; }
+.ani-analysis-status-title { margin: 0; color: var(--ani-ink); font-size: 22px; font-weight: 800; }
+.ani-analysis-status-copy { max-width: 560px; margin: 8px 0 0; color: var(--ani-ink-3); font-size: 13px; }
 .ani-analysis-error-panel { border-color: #fecaca; background: #fff7f7; }
 .ani-analysis-visually-hidden { position: absolute !important; overflow: hidden !important; width: 1px !important; height: 1px !important; clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; }
-button:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #38bdf8; outline-offset: 2px; }
+[data-surface-enter="recap"] { animation: ani-enter-deepen var(--ani-dur-4) var(--ani-ease-out) both; }
+button:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--ani-accent-bright); outline-offset: 2px; }
+@keyframes ani-analysis-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ani-analysis-overlay-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes ani-analysis-shell-in { from { opacity: 0; transform: translateY(14px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes ani-analysis-shell-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(10px) scale(.99); } }
+@keyframes ani-pop-in { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes ani-enter-deepen { from { opacity: 0; transform: translateY(16px) scale(.99); } to { opacity: 1; transform: none; } }
 ${dashboardCss}
 ${recapCss}
 @media (max-width: 760px) {
-  .ani-analysis-header-inner { grid-template-columns: minmax(0, 1fr) 42px; }
-  .ani-analysis-surface-nav { grid-row: 2; grid-column: 1 / -1; justify-self: stretch; }
-  .ani-analysis-surface-button { flex: 1; }
-  .ani-analysis-close { grid-column: 2; grid-row: 1; }
+  .ani-analysis-header-inner { grid-template-columns: minmax(0, 1fr) max-content; }
+  .ani-analysis-tools { grid-column: 2; grid-row: 1; }
+  .ani-analysis-surface-nav { grid-row: 2; grid-column: 1 / -1; width: auto; justify-self: stretch; }
   .ani-analysis-metadata-progress-header { align-items: flex-start; flex-direction: column; gap: 2px; }
   .ani-analysis-controls-inner { grid-template-columns: 1fr; }
-  .ani-analysis-axis-control { justify-self: stretch; }
-  .ani-analysis-axis-button { flex: 1; }
+  .ani-analysis-axis-control { width: auto; justify-self: stretch; }
   .ani-analysis-period-description { order: 3; }
-  .ani-analysis-cache-area { order: 4; display: grid; grid-template-columns: 1fr 1fr; }
-  .ani-analysis-cache-button, .ani-analysis-debug-button { width: 100%; white-space: normal; }
-  .ani-analysis-cache-feedback { left: 0; right: auto; }
   .ani-analysis-main { padding-inline: 12px; }
   .ani-analysis-main--recap { padding: 0; }
 }

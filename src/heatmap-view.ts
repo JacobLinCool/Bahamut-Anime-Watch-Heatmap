@@ -457,17 +457,20 @@ slot[name="ani-gamer-watch-focus-bridge"] {
 .ani-heatmap-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .ani-heatmap-analysis-button {
   height: 30px;
-  border: 1px solid #bae6fd;
+  border: 1px solid transparent;
   border-radius: 999px;
-  background: #f0f9ff;
-  color: #0369a1;
+  background: linear-gradient(135deg, #0284c7, #0ea5e9);
+  color: #fff;
   cursor: pointer;
   font: inherit;
   font-size: 12px;
   font-weight: 800;
-  padding: 0 13px;
+  padding: 0 15px;
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.28);
+  transition: transform 140ms cubic-bezier(.16,1,.3,1), box-shadow 140ms cubic-bezier(.16,1,.3,1), filter 140ms ease;
 }
-.ani-heatmap-analysis-button:hover { background: #e0f2fe; }
+.ani-heatmap-analysis-button:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(2, 132, 199, 0.34); filter: brightness(1.04); }
+.ani-heatmap-analysis-button:active { transform: translateY(0); }
 .ani-heatmap-analysis-button:focus-visible,
 .ani-heatmap-switch-button:focus-visible { outline: 2px solid #0f172a; outline-offset: 3px; }
 .ani-heatmap-switch {
@@ -516,7 +519,8 @@ slot[name="ani-gamer-watch-focus-bridge"] {
   padding: 4px 18px 14px;
   overflow-x: auto;
 }
-.ani-heatmap-months { grid-column: 2; display: grid; grid-template-columns: repeat(53, 12px); gap: 3px; min-width: max-content; height: 18px; color: #475569; font-size: 12px; }
+.ani-heatmap-months { grid-column: 2; display: grid; grid-template-columns: repeat(53, 12px); gap: 3px; min-width: max-content; height: 15px; color: #475569; font-size: 12px; }
+.ani-heatmap-months span { white-space: nowrap; overflow: visible; line-height: 15px; }
 .ani-heatmap-weekdays { grid-column: 1; display: grid; grid-template-rows: repeat(7, 12px); gap: 3px; color: #64748b; font-size: 12px; line-height: 12px; text-align: right; }
 .ani-heatmap-grid { grid-column: 2; display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px); grid-auto-columns: 12px; gap: 3px; min-width: max-content; }
 .ani-heatmap-day { width: 12px; height: 12px; border: 0; border-radius: 2px; background: #edf2f7; cursor: default; outline: none; padding: 0; }
@@ -565,6 +569,8 @@ slot[name="ani-gamer-watch-focus-bridge"] {
 }
 @media (prefers-reduced-motion: reduce) {
   .ani-heatmap-switch::before { transition: none; }
+  .ani-heatmap-analysis-button { transition: none; }
+  .ani-heatmap-analysis-button:hover { transform: none; }
 }
 @media (forced-colors: active) {
   .ani-heatmap-day { border: 1px solid CanvasText; }
