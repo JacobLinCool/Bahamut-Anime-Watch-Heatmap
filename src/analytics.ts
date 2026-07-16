@@ -16,7 +16,7 @@ import {
   type CalendarSeason,
   type ResolvedPeriod
 } from "./period";
-import { addTaipeiCalendarDays, toTaipeiDateKey } from "./time";
+import { addTaipeiCalendarDays, taipeiWeekday, toTaipeiDateKey } from "./time";
 
 const MIN_METADATA_COVERAGE = 0.9;
 const MIN_EXACT_COVERAGE = 1;
@@ -171,6 +171,50 @@ export type SeasonBreakdownRow = {
   readonly durationCoverage: CoverageResult;
 };
 
+export type ClockSegment = {
+  readonly key: "morning" | "daytime" | "evening" | "late-night";
+  readonly label: string;
+  /** Taipei-local hour range [startHour, endHour); late-night wraps midnight. */
+  readonly startHour: number;
+  readonly endHour: number;
+  readonly watchCount: number;
+  readonly share: number;
+};
+
+/** When the user actually presses play: Taipei-local hour and weekday distributions. */
+export type HabitClock = {
+  readonly available: boolean;
+  readonly hourCounts: readonly number[];
+  readonly peakHour: number | null;
+  readonly peakHourCount: number;
+  readonly segments: readonly ClockSegment[];
+  readonly topSegment: ClockSegment | null;
+  readonly weekdayCounts: readonly number[];
+  readonly topWeekday: { readonly weekday: number; readonly label: string; readonly watchCount: number } | null;
+};
+
+/** Sprint behavior along the user's own watch days (independent of the analysis axis). */
+export type Marathon = {
+  readonly available: boolean;
+  readonly peakDay: {
+    readonly dateKey: string;
+    readonly watchCount: number;
+    readonly knownContentMinutes: number;
+  } | null;
+  readonly longestStreak: {
+    readonly days: number;
+    readonly fromDateKey: string;
+    readonly toDateKey: string;
+  } | null;
+  readonly topSingleDayRun: {
+    readonly animeSn: number;
+    readonly title: string;
+    readonly coverUrl: string | null;
+    readonly dateKey: string;
+    readonly watchCount: number;
+  } | null;
+};
+
 export type AnalyticsResult = {
   readonly scope: AnalysisScope;
   readonly period: ResolvedPeriod;
@@ -207,6 +251,8 @@ export type AnalyticsResult = {
     readonly available: boolean;
     readonly rows: readonly CompletionRow[];
   };
+  readonly habitClock: HabitClock;
+  readonly marathon: Marathon;
   readonly timeliness: {
     readonly available: boolean;
     readonly coverage: CoverageResult;
@@ -354,6 +400,8 @@ export const analyzeWatchHistory = ({
       available: completionRows.length > 0,
       rows: completionRows
     },
+    habitClock: buildHabitClock(dataset),
+    marathon: buildMarathon(dataset),
     timeliness: {
       available: timelinessRows.length > 0,
       coverage: releaseCoverage,
@@ -1102,6 +1150,152 @@ const candidatesAtMinute = (
     animeSn,
     { animeSn, pendingVideoSns }
   ]));
+};
+
+const CLOCK_SEGMENT_DEFINITIONS = [
+  { key: "morning", label: "清晨", startHour: 5, endHour: 11 },
+  { key: "daytime", label: "白天", startHour: 11, endHour: 17 },
+  { key: "evening", label: "晚間", startHour: 17, endHour: 23 },
+  { key: "late-night", label: "深夜", startHour: 23, endHour: 5 }
+] as const;
+
+const WEEKDAY_LABELS = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"] as const;
+
+const taipeiHourOf = (instant: Date): number =>
+  new Date(instant.getTime() + 8 * 3_600_000).getUTCHours();
+
+const segmentHourList = (startHour: number, endHour: number): readonly number[] => {
+  const hours: number[] = [];
+  for (let hour = startHour; hour !== endHour; hour = (hour + 1) % 24) hours.push(hour);
+  return hours;
+};
+
+const buildHabitClock = (dataset: AnalysisDataset): HabitClock => {
+  const hourCounts = Array.from({ length: 24 }, () => 0);
+  const weekdayCounts = Array.from({ length: 7 }, () => 0);
+  for (const fact of dataset.selectedEvents) {
+    const hour = taipeiHourOf(fact.entry.watchedAt);
+    const weekday = taipeiWeekday(fact.entry.dateKey);
+    hourCounts[hour] = (hourCounts[hour] ?? 0) + 1;
+    weekdayCounts[weekday] = (weekdayCounts[weekday] ?? 0) + 1;
+  }
+  const total = dataset.selectedEvents.length;
+  if (total === 0) {
+    return {
+      available: false,
+      hourCounts,
+      peakHour: null,
+      peakHourCount: 0,
+      segments: [],
+      topSegment: null,
+      weekdayCounts,
+      topWeekday: null
+    };
+  }
+
+  const segments: ClockSegment[] = CLOCK_SEGMENT_DEFINITIONS.map((definition) => {
+    const watchCount = segmentHourList(definition.startHour, definition.endHour)
+      .reduce((sum, hour) => sum + hourCounts[hour]!, 0);
+    return { ...definition, watchCount, share: watchCount / total };
+  });
+  const topSegment = segments.reduce((best, segment) =>
+    segment.watchCount > best.watchCount ? segment : best);
+
+  const peakHour = hourCounts.reduce(
+    (best, count, hour) => count > hourCounts[best]! ? hour : best,
+    0
+  );
+  const topWeekdayIndex = weekdayCounts.reduce(
+    (best, count, weekday) => count > weekdayCounts[best]! ? weekday : best,
+    0
+  );
+
+  return {
+    available: true,
+    hourCounts,
+    peakHour,
+    peakHourCount: hourCounts[peakHour]!,
+    segments,
+    topSegment,
+    weekdayCounts,
+    topWeekday: {
+      weekday: topWeekdayIndex,
+      label: WEEKDAY_LABELS[topWeekdayIndex]!,
+      watchCount: weekdayCounts[topWeekdayIndex]!
+    }
+  };
+};
+
+const buildMarathon = (dataset: AnalysisDataset): Marathon => {
+  if (dataset.selectedEvents.length === 0) {
+    return { available: false, peakDay: null, longestStreak: null, topSingleDayRun: null };
+  }
+
+  const byDay = new Map<string, { watchCount: number; knownContentMinutes: number }>();
+  const byDayAnime = new Map<string, number>();
+  for (const fact of dataset.selectedEvents) {
+    const dateKey = fact.entry.dateKey;
+    const day = byDay.get(dateKey) ?? { watchCount: 0, knownContentMinutes: 0 };
+    day.watchCount += 1;
+    if (validDuration(fact.episode)) day.knownContentMinutes += fact.episode.durationMinutes;
+    byDay.set(dateKey, day);
+    if (fact.animeSn !== null) {
+      const runKey = `${dateKey}|${fact.animeSn}`;
+      byDayAnime.set(runKey, (byDayAnime.get(runKey) ?? 0) + 1);
+    }
+  }
+
+  const peakDayEntry = [...byDay.entries()].sort((left, right) =>
+    right[1].watchCount - left[1].watchCount || (left[0] < right[0] ? -1 : 1))[0]!;
+
+  const dayKeys = [...byDay.keys()].sort();
+  let longestStreak = { days: 1, fromDateKey: dayKeys[0]!, toDateKey: dayKeys[0]! };
+  let streakStart = dayKeys[0]!;
+  for (let index = 1; index < dayKeys.length; index++) {
+    const previous = dayKeys[index - 1]!;
+    const current = dayKeys[index]!;
+    if (addTaipeiCalendarDays(previous, 1) !== current) streakStart = current;
+    const days = spanInDays(streakStart, current);
+    if (days > longestStreak.days) longestStreak = { days, fromDateKey: streakStart, toDateKey: current };
+  }
+
+  const topRunEntry = [...byDayAnime.entries()].sort((left, right) =>
+    right[1] - left[1] || (left[0] < right[0] ? -1 : 1))[0];
+  let topSingleDayRun: Marathon["topSingleDayRun"] = null;
+  if (topRunEntry && topRunEntry[1] > 1) {
+    const [runKey, watchCount] = topRunEntry;
+    const separator = runKey.lastIndexOf("|");
+    const dateKey = runKey.slice(0, separator);
+    const animeSn = Number(runKey.slice(separator + 1));
+    topSingleDayRun = {
+      animeSn,
+      title: dataset.titleByAnimeSn.get(animeSn) ?? "",
+      coverUrl: dataset.selectedEvents.find((fact) => fact.animeSn === animeSn)?.anime?.coverUrl ?? null,
+      dateKey,
+      watchCount
+    };
+  }
+
+  return {
+    available: true,
+    peakDay: {
+      dateKey: peakDayEntry[0],
+      watchCount: peakDayEntry[1].watchCount,
+      knownContentMinutes: peakDayEntry[1].knownContentMinutes
+    },
+    longestStreak,
+    topSingleDayRun
+  };
+};
+
+const spanInDays = (fromDateKey: string, toDateKey: string): number => {
+  let days = 1;
+  let cursor = fromDateKey;
+  while (cursor < toDateKey) {
+    cursor = addTaipeiCalendarDays(cursor, 1);
+    days += 1;
+  }
+  return days;
 };
 
 const buildRhythm = (dataset: AnalysisDataset): readonly RhythmPoint[] => {

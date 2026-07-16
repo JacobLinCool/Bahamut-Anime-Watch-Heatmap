@@ -185,6 +185,34 @@ const fullResult = (): AnalyticsResult => {
         }
       ]
     },
+    habitClock: {
+      available: true,
+      hourCounts: Array.from({ length: 24 }, (_, hour) =>
+        hour === 23 ? 5 : hour === 22 ? 3 : hour === 12 ? 4 : 0),
+      peakHour: 23,
+      peakHourCount: 5,
+      segments: [
+        { key: "morning", label: "清晨", startHour: 5, endHour: 11, watchCount: 0, share: 0 },
+        { key: "daytime", label: "白天", startHour: 11, endHour: 17, watchCount: 4, share: 4 / 12 },
+        { key: "evening", label: "晚間", startHour: 17, endHour: 23, watchCount: 3, share: 3 / 12 },
+        { key: "late-night", label: "深夜", startHour: 23, endHour: 5, watchCount: 5, share: 5 / 12 }
+      ],
+      topSegment: { key: "late-night", label: "深夜", startHour: 23, endHour: 5, watchCount: 5, share: 5 / 12 },
+      weekdayCounts: [0, 0, 0, 0, 0, 7, 5],
+      topWeekday: { weekday: 5, label: "週五", watchCount: 7 }
+    },
+    marathon: {
+      available: true,
+      peakDay: { dateKey: "2026-07-04", watchCount: 6, knownContentMinutes: 144 },
+      longestStreak: { days: 4, fromDateKey: "2026-07-01", toDateKey: "2026-07-04" },
+      topSingleDayRun: {
+        animeSn: 10,
+        title: "作品 A",
+        coverUrl: cover("anime-a"),
+        dateKey: "2026-07-04",
+        watchCount: 4
+      }
+    },
     timeliness: {
       available: true,
       coverage: coverage(12),
@@ -262,8 +290,11 @@ describe("recap presentation deck", () => {
     expect(deck.chapters.map((item) => item.kind)).toEqual([
       "overview",
       "season-breakdown",
+      "habit-clock",
+      "marathon",
       "runtime",
       "taste",
+      "completion",
       "timeliness",
       "behavior-preference"
     ]);
@@ -321,8 +352,11 @@ describe("recap presentation deck", () => {
 
     expect(deck.chapters.map((item) => item.kind)).toEqual([
       "overview",
+      "habit-clock",
+      "marathon",
       "runtime",
       "taste",
+      "completion",
       "timeliness",
       "behavior-preference"
     ]);
@@ -469,6 +503,17 @@ describe("evidence gates", () => {
         publishers: []
       },
       completion: { available: false, rows: [] },
+      habitClock: {
+        available: false,
+        hourCounts: Array.from({ length: 24 }, () => 0),
+        peakHour: null,
+        peakHourCount: 0,
+        segments: [],
+        topSegment: null,
+        weekdayCounts: Array.from({ length: 7 }, () => 0),
+        topWeekday: null
+      },
+      marathon: { available: false, peakDay: null, longestStreak: null, topSingleDayRun: null },
       timeliness: { available: false, coverage: coverage(8, 12, false), rows: [] },
       preference: {
         available: false,
@@ -509,8 +554,11 @@ describe("evidence gates", () => {
     expect(deck.chapters.map((item) => item.kind)).toEqual([
       "overview",
       "season-breakdown",
+      "habit-clock",
+      "marathon",
       "runtime",
       "taste",
+      "completion",
       "timeliness",
       "behavior-preference"
     ]);
@@ -522,7 +570,7 @@ describe("fingerprint", () => {
     const first = buildRecapDeck(fullResult());
     const second = buildRecapDeck(fullResult());
     expect(first.fingerprint).toBe(second.fingerprint);
-    expect(first.fingerprint).toMatch(/^recap-v3:[a-f0-9]{64}$/);
+    expect(first.fingerprint).toMatch(/^recap-v4:[a-f0-9]{64}$/);
   });
 
   it("changes for substantive analytic and metadata-derived presentation changes", () => {

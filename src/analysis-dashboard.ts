@@ -11,7 +11,8 @@ import {
   formatDuration,
   formatInteger,
   formatLag,
-  formatPercent
+  formatPercent,
+  truncateText
 } from "./analysis-format";
 import { createButton, createCover, element, textElement } from "./view-dom";
 
@@ -52,6 +53,20 @@ export const renderDashboard = (options: DashboardRenderOptions): HTMLElement =>
     Array.from(root.children).forEach((child, index) => {
       if (child instanceof HTMLElement) child.style.setProperty("--ani-order", String(index));
     });
+    // Rows and cards cascade within their group; the index restarts per parent
+    // so every module reads as its own small wave.
+    const staggered = root.querySelectorAll<HTMLElement>([
+      ".ani-dashboard-stat",
+      ".ani-dashboard-season-card",
+      ".ani-dashboard-ranked-row",
+      ".ani-dashboard-platform-row",
+      ".ani-dashboard-footprint-row",
+      ".ani-dashboard-compact-list li"
+    ].join(", "));
+    for (const node of staggered) {
+      const index = node.parentElement ? Array.from(node.parentElement.children).indexOf(node) : 0;
+      node.style.setProperty("--ani-stagger", String(Math.min(Math.max(0, index), 9)));
+    }
   }
   return root;
 };
@@ -118,7 +133,7 @@ const renderLedeInsights = (result: AnalyticsResult): HTMLElement | null => {
   }
 
   const companion = result.runtime.available ? result.runtime.rows[0] : undefined;
-  if (companion) chips.push(`《${companion.title}》陪了你 ${formatCompactDuration(companion.contentMinutes)}`);
+  if (companion) chips.push(`《${truncateText(companion.title, 18)}》陪了你 ${formatCompactDuration(companion.contentMinutes)}`);
 
   if (chips.length === 0) return null;
   const list = element("ul", "ani-dashboard-insights");
@@ -130,16 +145,26 @@ const renderGlance = (result: AnalyticsResult): HTMLElement => {
   const grid = element("section", "ani-dashboard-glance");
   grid.setAttribute("aria-label", "觀看摘要");
   const activityLabel = result.scope.axis === "released-at" ? "有上架的日子" : "有觀看的日子";
-  const cards: ReadonlyArray<readonly [string, number]> = [
-    ["觀看次數", result.summary.watchCount],
-    ["不同單集", result.summary.uniqueEpisodeCount],
-    ["作品數", result.summary.animeCount],
-    [activityLabel, result.summary.activeDayCount]
+  // 觀看次數 == 不同單集（沒有重看）時，兩張同數字的卡片只是雜訊；改放日均密度。
+  const rewatchCount = result.summary.watchCount - result.summary.uniqueEpisodeCount;
+  const secondCard: GlanceCard = rewatchCount > 0
+    ? { label: "重看次數", text: formatInteger(rewatchCount), countTo: rewatchCount }
+    : {
+        label: "平均每個觀看日",
+        text: result.summary.activeDayCount > 0
+          ? `${averagePerDay(result.summary.watchCount, result.summary.activeDayCount)} 次`
+          : "—"
+      };
+  const cards: readonly GlanceCard[] = [
+    { label: "觀看次數", text: formatInteger(result.summary.watchCount), countTo: result.summary.watchCount },
+    secondCard,
+    { label: "作品數", text: formatInteger(result.summary.animeCount), countTo: result.summary.animeCount },
+    { label: activityLabel, text: formatInteger(result.summary.activeDayCount), countTo: result.summary.activeDayCount }
   ];
-  for (const [label, value] of cards) {
+  for (const { label, text, countTo } of cards) {
     const card = element("article", "ani-dashboard-stat");
-    const valueEl = textElement("strong", "ani-dashboard-stat-value", formatInteger(value));
-    valueEl.dataset.countTo = String(value);
+    const valueEl = textElement("strong", "ani-dashboard-stat-value", text);
+    if (countTo !== undefined) valueEl.dataset.countTo = String(countTo);
     card.append(
       textElement("span", "ani-dashboard-stat-label", label),
       valueEl
@@ -148,6 +173,11 @@ const renderGlance = (result: AnalyticsResult): HTMLElement => {
   }
   return grid;
 };
+
+type GlanceCard = { readonly label: string; readonly text: string; readonly countTo?: number };
+
+const averagePerDay = (watchCount: number, activeDayCount: number): string =>
+  new Intl.NumberFormat("zh-TW", { maximumFractionDigits: 1 }).format(watchCount / activeDayCount);
 
 const renderCluster = (
   index: string,
@@ -179,15 +209,40 @@ const renderCluster = (
   return section;
 };
 
+/** Seasons beyond this many cards collapse into one "更早" summary so the long tail stays one glance. */
+const SEASON_CARD_LIMIT = 8;
+
 const renderSeasonBreakdown = (result: AnalyticsResult): HTMLElement => {
   const section = moduleShell("上架季分布");
 
   const grid = element("div", "ani-dashboard-season-grid");
-  const max = Math.max(1, ...result.seasonBreakdown.map((row) => row.watchCount));
-  for (const row of result.seasonBreakdown) {
+  const rows = result.seasonBreakdown;
+  const folded = rows.length > SEASON_CARD_LIMIT + 1 ? rows.slice(0, rows.length - SEASON_CARD_LIMIT) : [];
+  const shown = rows.slice(folded.length);
+  const max = Math.max(1, ...rows.map((row) => row.watchCount));
+
+  if (folded.length > 0) {
+    const card = element("article", "ani-dashboard-season-card ani-dashboard-season-card--folded");
+    const watchCount = folded.reduce((sum, row) => sum + row.watchCount, 0);
+    const animeCount = folded.reduce((sum, row) => sum + row.animeCount, 0);
+    const first = folded[0]!;
+    const last = folded.at(-1)!;
+    card.title = folded.map((row) => `${row.label} · ${formatInteger(row.watchCount)} 次`).join("\n");
+    card.append(
+      textElement("span", "ani-dashboard-season-label", `${first.label} – ${last.label}`),
+      textElement("strong", "ani-dashboard-season-value", `${formatInteger(watchCount)} 次觀看`),
+      textElement("span", "ani-dashboard-season-meta", `更早的 ${formatInteger(folded.length)} 季 · ${formatInteger(animeCount)} 部作品`),
+      meterBar(watchCount / max)
+    );
+    grid.append(card);
+  }
+
+  for (const row of shown) {
     const card = element("article", "ani-dashboard-season-card");
     card.dataset.season = row.season;
-    card.dataset.peak = String(row.watchCount === max && row.watchCount > 0);
+    const isPeak = row.watchCount === max && row.watchCount > 0;
+    card.dataset.peak = String(isPeak);
+    if (isPeak) card.append(textElement("span", "ani-dashboard-season-flag", "峰值"));
     card.append(
       textElement("span", "ani-dashboard-season-label", row.label),
       textElement("strong", "ani-dashboard-season-value", `${formatInteger(row.watchCount)} 次觀看`),
@@ -264,12 +319,14 @@ export const renderRhythm = (
     bars.append(bar);
   });
   const labels = element("div", "ani-dashboard-rhythm-labels");
-  const first = points[0];
-  const middle = points[Math.floor(points.length / 2)];
-  const last = points.at(-1);
-  if (first) labels.append(textElement("span", "", first.label));
-  if (middle && middle !== first && middle !== last) labels.append(textElement("span", "", middle.label));
-  if (last && last !== first) labels.append(textElement("span", "", last.label));
+  const tickCount = Math.min(5, points.length);
+  const seen = new Set<number>();
+  for (let tick = 0; tick < tickCount; tick++) {
+    const index = Math.round((points.length - 1) * (tickCount === 1 ? 0 : tick / (tickCount - 1)));
+    if (seen.has(index)) continue;
+    seen.add(index);
+    labels.append(textElement("span", "", points[index]!.label));
+  }
   labels.setAttribute("aria-hidden", "true");
   chart.append(bars, labels, renderRhythmDataTable(points, axis));
   section.append(chart);
@@ -458,6 +515,8 @@ const renderDimension = (title: string, rows: readonly DimensionRow[]): HTMLElem
   const list = element("ol", "ani-dashboard-compact-list");
   const shown = rows.slice(0, 6);
   const max = Math.max(1, ...shown.map((row) => row.watchCount));
+  // 每列都只來自一部作品時（常見於導演），bar 長度只是把同一件事畫兩次，省下來。
+  const meaningfulBars = shown.some((row) => row.animeCount > 1);
   for (const row of shown) {
     const item = element("li");
     const line = element("div", "ani-dashboard-compact-line");
@@ -465,7 +524,8 @@ const renderDimension = (title: string, rows: readonly DimensionRow[]): HTMLElem
       textElement("span", "ani-dashboard-compact-label", row.label),
       textElement("span", "ani-dashboard-compact-value", `${formatInteger(row.watchCount)} 次觀看 · ${formatInteger(row.animeCount)} 部作品`)
     );
-    item.append(line, meterBar(row.watchCount / max));
+    item.append(line);
+    if (meaningfulBars) item.append(meterBar(row.watchCount / max));
     list.append(item);
   }
   card.append(list);
@@ -524,12 +584,12 @@ export const dashboardCss = `
 .ani-dashboard-lede-headline { margin: 0; max-inline-size: 16em; color: var(--ani-ink); font-size: clamp(30px, 5vw, 52px); font-weight: 900; letter-spacing: -.02em; line-height: 1.12; text-wrap: balance; }
 .ani-dashboard-lede-caption { margin: 0; color: var(--ani-ink-3); font-size: 13px; font-variant-numeric: tabular-nums; }
 .ani-dashboard-insights { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 0; padding: 0; list-style: none; }
-.ani-dashboard-insights li { border: 1px solid var(--ani-accent-tint); border-radius: var(--ani-r-pill); background: var(--ani-accent-tint); color: var(--ani-accent-ink); font-size: 11px; font-weight: 800; padding: 6px 12px; }
+.ani-dashboard-insights li { max-width: 100%; border: 1px solid var(--ani-accent-tint); border-radius: var(--ani-r-pill); background: var(--ani-accent-tint); color: var(--ani-accent-ink); font-size: 11px; font-weight: 800; padding: 6px 12px; overflow-wrap: anywhere; }
 .ani-dashboard-recap-button { display: inline-flex; align-items: center; gap: 7px; margin-top: 2px; border: 0; border-radius: var(--ani-r-pill); background: var(--ani-ink); color: #fff; cursor: pointer; font: inherit; font-size: 13px; font-weight: 800; padding: 12px 20px; box-shadow: var(--ani-shadow-2); transition: transform var(--ani-dur-1) var(--ani-ease), box-shadow var(--ani-dur-1) var(--ani-ease); }
 .ani-dashboard-recap-button::after { content: "→"; font-weight: 700; }
 .ani-dashboard-recap-button:hover { transform: translateY(-1px); box-shadow: 0 16px 34px rgba(13, 21, 38, .26); }
 .ani-dashboard-lede-figure { display: grid; justify-items: end; align-content: center; gap: 2px; text-align: right; }
-.ani-dashboard-lede-figure-value { color: var(--ani-accent-ink); font-size: clamp(28px, 3.6vw, 44px); font-weight: 900; letter-spacing: -.03em; line-height: 1.05; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ani-dashboard-lede-figure-value { max-inline-size: 8em; color: var(--ani-accent-ink); font-size: clamp(28px, 3.6vw, 44px); font-weight: 900; letter-spacing: -.03em; line-height: 1.08; text-wrap: balance; font-variant-numeric: tabular-nums; }
 .ani-dashboard-lede-figure-unit { color: var(--ani-accent); font-size: 12px; font-weight: 800; }
 .ani-dashboard-glance { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--ani-line); border-bottom: 1px solid var(--ani-line); }
 .ani-dashboard-stat { display: grid; gap: 5px; align-content: center; min-height: 86px; padding: 16px 22px; }
@@ -558,6 +618,9 @@ export const dashboardCss = `
 .ani-dashboard-season-card[data-season="summer"] { --ani-season: #f59e0b; }
 .ani-dashboard-season-card[data-season="autumn"] { --ani-season: #f97316; }
 .ani-dashboard-season-card[data-peak="true"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ani-season) 45%, transparent); }
+.ani-dashboard-season-card--folded { background: transparent; box-shadow: inset 0 0 0 1px var(--ani-line); --ani-season: var(--ani-line-strong); }
+.ani-dashboard-season-card--folded .ani-dashboard-season-value { color: var(--ani-ink-2); }
+.ani-dashboard-season-flag { position: absolute; top: 10px; right: 10px; border-radius: var(--ani-r-pill); background: var(--ani-hot-tint); color: var(--ani-hot-ink); font-size: 9px; font-weight: 900; letter-spacing: .06em; padding: 3px 8px; }
 .ani-dashboard-season-card .ani-dashboard-meter { max-width: none; margin-top: 7px; }
 .ani-dashboard-season-card .ani-dashboard-meter::after { background: var(--ani-season); }
 .ani-dashboard-season-label { color: var(--ani-ink-2); font-size: 12px; font-weight: 800; }
@@ -580,12 +643,14 @@ export const dashboardCss = `
 .ani-dashboard-rank[data-top="true"] { background: var(--ani-hot-tint); color: var(--ani-hot-ink); }
 .ani-dashboard-row-cover { display: grid; place-items: center; overflow: hidden; width: 42px; aspect-ratio: 3 / 4; border-radius: 8px; background: linear-gradient(145deg, var(--ani-line), var(--ani-line-strong)); box-shadow: inset 0 0 0 1px rgba(13, 21, 38, .05); }
 .ani-dashboard-row-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ani-dashboard .ani-cover-fallback { color: var(--ani-ink-3); font-size: 15px; font-weight: 900; opacity: .75; user-select: none; }
+.ani-dashboard-feature-cover .ani-cover-fallback { font-size: 21px; }
 .ani-dashboard-row-copy { display: grid; min-width: 0; gap: 2px; }
 .ani-dashboard-row-title { overflow: hidden; color: var(--ani-ink); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .ani-dashboard-row-meta { overflow: hidden; color: var(--ani-ink-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .ani-dashboard-row-value { color: var(--ani-ink); font-size: 12px; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
 .ani-dashboard-feature { display: grid; grid-template-columns: 60px auto auto; align-items: center; gap: 16px; width: fit-content; max-width: 100%; overflow: hidden; border: 0; border-radius: var(--ani-r-md); background: linear-gradient(120deg, var(--ani-hot-tint), var(--ani-surface-sunken)); padding: 12px 22px 12px 12px; }
-.ani-dashboard-feature-cover { overflow: hidden; width: 60px; aspect-ratio: 3 / 4; border-radius: 8px; background: var(--ani-line-strong); }
+.ani-dashboard-feature-cover { display: grid; place-items: center; overflow: hidden; width: 60px; aspect-ratio: 3 / 4; border-radius: 8px; background: linear-gradient(145deg, var(--ani-line), var(--ani-line-strong)); }
 .ani-dashboard-feature-cover img { width: 100%; height: 100%; object-fit: cover; }
 .ani-dashboard-feature-copy { display: grid; gap: 2px; min-width: 0; }
 .ani-dashboard-feature-kicker { color: var(--ani-hot-ink); font-size: 10px; font-weight: 900; letter-spacing: .08em; }
@@ -617,10 +682,16 @@ export const dashboardCss = `
 .ani-dashboard-platform-delta[data-tone="ahead"] { background: var(--ani-hot-tint); color: var(--ani-hot-ink); }
 .ani-dashboard-platform-delta[data-tone="behind"] { background: var(--ani-accent-tint); color: var(--ani-accent-ink); }
 .ani-dashboard-platform-delta[data-tone="even"] { background: var(--ani-surface-sunken); color: var(--ani-ink-3); }
-.ani-dashboard--reveal > * { animation: ani-dashboard-rise var(--ani-dur-3) var(--ani-ease-out) both; animation-delay: calc(var(--ani-order, 0) * 68ms); }
-.ani-dashboard--reveal .ani-dashboard-rhythm-bar { animation: ani-dashboard-bar var(--ani-dur-3) var(--ani-ease-out) both; animation-delay: calc(240ms + var(--ani-order, 0) * 18ms); transform-origin: bottom; }
-.ani-dashboard--reveal .ani-dashboard-meter::after { transform-origin: left center; animation: ani-dashboard-meter-grow 620ms var(--ani-ease-out) 320ms both; }
-@keyframes ani-dashboard-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+.ani-dashboard--reveal > * { animation: ani-dashboard-rise var(--ani-dur-4) var(--ani-ease-out) both; animation-delay: calc(var(--ani-order, 0) * 72ms); }
+.ani-dashboard--reveal .ani-dashboard-stat { animation: ani-dashboard-rise var(--ani-dur-4) var(--ani-ease-out) both; animation-delay: calc(90ms + var(--ani-stagger, 0) * 55ms); }
+.ani-dashboard--reveal .ani-dashboard-season-card,
+.ani-dashboard--reveal .ani-dashboard-ranked-row,
+.ani-dashboard--reveal .ani-dashboard-platform-row,
+.ani-dashboard--reveal .ani-dashboard-footprint-row,
+.ani-dashboard--reveal .ani-dashboard-compact-list li { animation: ani-dashboard-rise var(--ani-dur-4) var(--ani-ease-out) both; animation-delay: calc(160ms + var(--ani-order, 0) * 72ms + var(--ani-stagger, 0) * 45ms); }
+.ani-dashboard--reveal .ani-dashboard-rhythm-bar { animation: ani-dashboard-bar 460ms var(--ani-ease-out) both; animation-delay: calc(260ms + var(--ani-order, 0) * 22ms); transform-origin: bottom; }
+.ani-dashboard--reveal .ani-dashboard-meter::after { transform-origin: left center; animation: ani-dashboard-meter-grow 640ms var(--ani-ease-out) both; animation-delay: calc(420ms + var(--ani-stagger, 0) * 45ms); }
+@keyframes ani-dashboard-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 @keyframes ani-dashboard-bar { from { transform: scaleY(0); opacity: .35; } to { transform: scaleY(1); opacity: 1; } }
 @keyframes ani-dashboard-meter-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 @media (max-width: 820px) {

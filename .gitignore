@@ -143,3 +143,5 @@ output/playwright/
 .pnp.*
 .DS_Store
 .render-harness/
+
+data/

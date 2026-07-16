@@ -51,6 +51,46 @@ describe("recap mobile overflow contract", () => {
   });
 });
 
+describe("recap transition animation contract", () => {
+  it("never applies transition-only styles to the idle stage", () => {
+    expect(recapCss).not.toMatch(/\.ani-recap-stage\[data-transition\](?!\s*=)/);
+    expect(recapCss).toContain(
+      '.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"])'
+    );
+  });
+});
+
+describe("recap marathon layout contract", () => {
+  it("stretches the supporting facts across the full visual column", () => {
+    expect(recapCss).toMatch(
+      /\.ani-recap-marathon-facts\s*\{[^}]*width:\s*100%;[^}]*margin-top:\s*0;/
+    );
+    expect(recapCss).toMatch(
+      /\.ani-recap-marathon-facts\s*>\s*\.ani-recap-outro-fact\s*\{[^}]*flex:\s*1 1 0;/
+    );
+    expect(recapCss).not.toContain("ani-recap-summary--start");
+  });
+});
+
+describe("recap taste ranking alignment", () => {
+  it("reserves the meter row when a dimension intentionally omits bars", () => {
+    expect(recapCss).toMatch(
+      /\.ani-recap-taste-column li\s*\{[^}]*display:\s*grid;[^}]*grid-template-rows:\s*auto 7px;/
+    );
+    expect(recapCss).toMatch(
+      /\.ani-recap-taste-column li \.ani-recap-meter\s*\{[^}]*align-self:\s*end;[^}]*height:\s*3px;[^}]*margin-top:\s*0;/
+    );
+  });
+});
+
+describe("recap story title wrapping", () => {
+  it("keeps an emphasized phrase together when it fits on the next line", () => {
+    expect(recapCss).toMatch(
+      /\.ani-recap-title-em\s*\{[^}]*display:\s*inline-block;[^}]*max-inline-size:\s*100%;[^}]*text-wrap:\s*balance;/
+    );
+  });
+});
+
 type TestKeyboardEvent = Pick<KeyboardEvent,
   "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "preventDefault" | "stopPropagation"
 > & {

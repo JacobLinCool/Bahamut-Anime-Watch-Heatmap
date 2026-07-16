@@ -26,6 +26,7 @@ import {
   type RecapUiState
 } from "./recap/recap-state";
 import {
+  createRecapGhost,
   recapCss,
   RECAP_EVIDENCE_OPENER_FOCUS_KEY,
   renderRecapSurface
@@ -734,6 +735,29 @@ export class AnalysisView {
       return;
     }
 
+    // 換頁時把舊章節留成退場 ghost：疊在新章節上方溶出，形成雙向交錯。
+    // 同一頁的重複 render（背景資料更新）不重播進場、不做 ghost，避免內容閃爍。
+    const nextViewId = this.#uiState.kind === "recap-intro"
+      ? "intro"
+      : this.#uiState.kind === "recap-outro"
+        ? "outro"
+        : this.#uiState.kind === "recap-chapter" || this.#uiState.kind === "recap-evidence"
+          ? this.#uiState.chapterId
+          : "";
+    const previousRecapRoot = this.#renderedSurface === "recap"
+      ? main.querySelector<HTMLElement>(".ani-recap-stage, .ani-recap-intro")
+      : null;
+    const previousViewId = previousRecapRoot?.dataset.viewId ?? null;
+    const transitionDirection = (this.#uiState.kind === "recap-chapter" || this.#uiState.kind === "recap-outro")
+      && this.#uiState.transition.phase === "running"
+      ? this.#uiState.transition.direction
+      : null;
+    const repeatTransitionRender = transitionDirection !== null && previousViewId === nextViewId;
+    const ghostRoot = transitionDirection && previousRecapRoot && previousViewId !== nextViewId
+      && !prefersReducedMotion()
+      ? previousRecapRoot
+      : null;
+
     const recap = renderRecapSurface({
       state: this.#uiState,
       result,
@@ -746,8 +770,19 @@ export class AnalysisView {
       onDashboard: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "dashboard" }),
       onAnimationFinished: () => this.#dispatch({ type: "ANIMATION_FINISHED" })
     });
+    if (this.#uiState.kind === "recap-intro" && previousViewId !== "intro" && !prefersReducedMotion()) {
+      recap.dataset.enter = "true";
+    }
+    if (repeatTransitionRender) {
+      // 這場 transition 已經播過了：直接定格，並讓狀態機收尾。
+      recap.dataset.transition = "idle";
+      queueMicrotask(() => this.#dispatch({ type: "ANIMATION_FINISHED" }));
+    }
     this.#applySurfaceEnter(recap, "recap");
     main.replaceChildren(recap);
+    if (ghostRoot && transitionDirection) {
+      main.append(createRecapGhost(ghostRoot, transitionDirection));
+    }
     // Chapter and intro numerals count up once per view; skip evidence round-trips,
     // which re-render the same chapter underneath the closing panel.
     if (
@@ -773,6 +808,7 @@ export class AnalysisView {
     this.#countUpFrames = [];
     if (prefersReducedMotion()) return;
     for (const node of main.querySelectorAll<HTMLElement>("[data-count-to]")) {
+      if (node.closest(".ani-recap-ghost")) continue;
       const target = Number(node.dataset.countTo);
       if (Number.isFinite(target)) this.#animateCountUp(node, target);
     }
@@ -1256,7 +1292,7 @@ export const analysisCss = `
 .ani-analysis-select { width: 100%; min-height: 38px; border: 1px solid var(--ani-line-strong); border-radius: var(--ani-r-sm); background: var(--ani-surface); color: var(--ani-ink); font: inherit; font-size: 12px; padding: 7px 30px 7px 12px; cursor: pointer; }
 .ani-analysis-period-description { min-width: 0; color: var(--ani-ink-3); font-size: 10px; line-height: 1.45; }
 .ani-analysis-main { display: grid; padding: 26px 20px max(54px, env(safe-area-inset-bottom)); }
-.ani-analysis-main--recap { width: 100%; min-height: 0; padding: 0; background: #060a14; }
+.ani-analysis-main--recap { position: relative; width: 100%; min-height: 0; padding: 0; background: #060a14; }
 .ani-analysis-status-panel { display: grid; place-items: center; align-content: center; min-height: 52vh; border: 1px solid var(--ani-line); border-radius: var(--ani-r-lg); background: var(--ani-surface); box-shadow: var(--ani-shadow-1); padding: 32px; text-align: center; }
 .ani-analysis-status-title { margin: 0; color: var(--ani-ink); font-size: 22px; font-weight: 800; }
 .ani-analysis-status-copy { max-width: 560px; margin: 8px 0 0; color: var(--ani-ink-3); font-size: 13px; }

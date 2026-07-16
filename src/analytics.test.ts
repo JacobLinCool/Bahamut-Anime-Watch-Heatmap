@@ -1109,3 +1109,101 @@ describe("history coverage", () => {
     expect(result.summary.watchCount).toBe(1);
   });
 });
+
+describe("habit clock", () => {
+  it("buckets watches by Taipei hour, segment, and weekday", () => {
+    const records = [
+      episode(1, 10, 0, "2026-07-01T08:00:00+08:00"),
+      episode(2, 10, 1, "2026-07-02T08:00:00+08:00"),
+      episode(3, 10, 2, "2026-07-03T08:00:00+08:00")
+    ];
+    const result = analyze({
+      entries: [
+        entry(1, "2026-07-03T23:30:00+08:00", "作品 A"),
+        entry(2, "2026-07-04T23:10:00+08:00", "作品 A"),
+        entry(3, "2026-07-04T12:00:00+08:00", "作品 A")
+      ],
+      episodeRecords: records,
+      animeRecords: [animeRecord(10, [ref(1, 1), ref(2, 2), ref(3, 3)])]
+    });
+
+    expect(result.habitClock.available).toBe(true);
+    expect(result.habitClock.hourCounts[23]).toBe(2);
+    expect(result.habitClock.hourCounts[12]).toBe(1);
+    expect(result.habitClock.peakHour).toBe(23);
+    expect(result.habitClock.peakHourCount).toBe(2);
+    expect(result.habitClock.topSegment).toMatchObject({ key: "late-night", watchCount: 2 });
+    expect(result.habitClock.topSegment?.share).toBeCloseTo(2 / 3);
+    // 2026-07-03 是週五、07-04 是週六：週六有兩次（23:10 與 12:00）。
+    expect(result.habitClock.topWeekday).toMatchObject({ label: "週六", watchCount: 2 });
+  });
+
+  it("is unavailable without watches in scope", () => {
+    const result = analyze({ entries: [], episodeRecords: [] });
+    expect(result.habitClock.available).toBe(false);
+    expect(result.habitClock.topSegment).toBeNull();
+  });
+});
+
+describe("marathon", () => {
+  it("finds the peak day, longest streak, and biggest single-day run", () => {
+    const records = [
+      episode(1, 100, 0, "2026-06-30T00:00:00+08:00"),
+      episode(2, 100, 1, "2026-07-01T00:00:00+08:00"),
+      episode(3, 100, 2, "2026-07-02T00:00:00+08:00"),
+      episode(4, 100, 3, "2026-07-02T12:00:00+08:00"),
+      episode(5, 200, 0, "2026-07-01T00:00:00+08:00"),
+      episode(6, 200, 1, "2026-07-05T00:00:00+08:00")
+    ];
+    const result = analyze({
+      entries: [
+        entry(1, "2026-07-01T20:00:00+08:00", "作品 甲"),
+        entry(2, "2026-07-02T20:00:00+08:00", "作品 甲"),
+        entry(3, "2026-07-03T20:00:00+08:00", "作品 甲"),
+        entry(4, "2026-07-03T21:00:00+08:00", "作品 甲"),
+        entry(5, "2026-07-03T22:00:00+08:00", "作品 乙"),
+        entry(6, "2026-07-10T20:00:00+08:00", "作品 乙")
+      ],
+      episodeRecords: records,
+      animeRecords: [
+        animeRecord(100, [ref(1, 1), ref(2, 2), ref(3, 3), ref(4, 4)]),
+        animeRecord(200, [ref(5, 1), ref(6, 2)])
+      ]
+    });
+
+    expect(result.marathon.available).toBe(true);
+    expect(result.marathon.peakDay).toMatchObject({
+      dateKey: "2026-07-03",
+      watchCount: 3,
+      knownContentMinutes: 72
+    });
+    expect(result.marathon.longestStreak).toMatchObject({
+      days: 3,
+      fromDateKey: "2026-07-01",
+      toDateKey: "2026-07-03"
+    });
+    expect(result.marathon.topSingleDayRun).toMatchObject({
+      animeSn: 100,
+      title: "作品 甲",
+      dateKey: "2026-07-03",
+      watchCount: 2
+    });
+  });
+
+  it("omits a single-day run when no anime repeats within a day", () => {
+    const records = [
+      episode(1, 100, 0, "2026-06-30T00:00:00+08:00"),
+      episode(2, 200, 0, "2026-07-01T00:00:00+08:00")
+    ];
+    const result = analyze({
+      entries: [
+        entry(1, "2026-07-03T20:00:00+08:00", "作品 甲"),
+        entry(2, "2026-07-03T21:00:00+08:00", "作品 乙")
+      ],
+      episodeRecords: records,
+      animeRecords: [animeRecord(100, [ref(1, 1)]), animeRecord(200, [ref(2, 1)])]
+    });
+    expect(result.marathon.peakDay).toMatchObject({ dateKey: "2026-07-03", watchCount: 2 });
+    expect(result.marathon.topSingleDayRun).toBeNull();
+  });
+});

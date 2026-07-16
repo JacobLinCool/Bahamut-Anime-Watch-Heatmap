@@ -30,9 +30,14 @@ export const createCover = (
   className: string
 ): HTMLElement => {
   const frame = element("div", className);
-  if (url === null) {
+  const markEmpty = (): void => {
     frame.dataset.empty = "true";
     frame.setAttribute("aria-hidden", "true");
+    const glyph = [...alt.trim()][0];
+    frame.replaceChildren(...(glyph ? [textElement("span", "ani-cover-fallback", glyph)] : []));
+  };
+  if (url === null) {
+    markEmpty();
     return frame;
   }
   const image = element("img");
@@ -41,6 +46,7 @@ export const createCover = (
   image.loading = "lazy";
   image.decoding = "async";
   image.referrerPolicy = "no-referrer";
+  image.addEventListener("error", markEmpty, { once: true });
   frame.append(image);
   return frame;
 };

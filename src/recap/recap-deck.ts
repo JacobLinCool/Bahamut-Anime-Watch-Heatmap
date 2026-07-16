@@ -1,20 +1,26 @@
 import type {
   AnalyticsResult,
+  ClockSegment,
+  CompletionRow,
   DimensionRow,
   PreferenceRow,
   SeasonBreakdownRow,
   SeriesRuntimeRow,
   TimelinessRow
 } from "../analytics";
+import { formatInteger, formatPercent, truncateText } from "../analysis-format";
 import {
   analysisScopeKey,
   type AnalysisAxis,
   type CalendarSeason,
   type PeriodDefinition
 } from "../period";
+
+/** Story titles weave work titles into sentences; clamp them so one runaway title can't take over the stage. */
+const STORY_TITLE_LIMIT = 20;
 import type { RecapChapter, RecapDeck } from "./recap-state";
 
-const RECAP_SCHEMA_VERSION = 3;
+const RECAP_SCHEMA_VERSION = 4;
 const MAX_RANKED_ROWS = 5;
 const SEASON_ORDER: readonly CalendarSeason[] = ["winter", "spring", "summer", "autumn"];
 
@@ -46,10 +52,14 @@ export type RecapEvidenceRow =
 export type RecapChapterKind =
   | "overview"
   | "season-breakdown"
+  | "habit-clock"
+  | "marathon"
   | "runtime"
   | "timeliness"
   | "behavior-preference"
-  | "taste";
+  | "taste"
+  | "completion"
+  | "platform-taste";
 
 type RecapChapterBase<Kind extends RecapChapterKind, Payload> = RecapChapter & {
   readonly kind: Kind;
@@ -174,13 +184,86 @@ export type TastePayload = {
 
 export type TasteChapter = RecapChapterBase<"taste", TastePayload>;
 
+export type HabitClockPayload = {
+  readonly hourCounts: readonly number[];
+  readonly peakHour: number;
+  readonly peakHourCount: number;
+  readonly segments: readonly ClockSegment[];
+  readonly topSegment: ClockSegment;
+  readonly topWeekday: { readonly weekday: number; readonly label: string; readonly watchCount: number };
+};
+
+export type HabitClockChapter = RecapChapterBase<"habit-clock", HabitClockPayload>;
+
+export type MarathonPayload = {
+  readonly peakDay: {
+    readonly dateKey: string;
+    readonly watchCount: number;
+    readonly knownContentMinutes: number;
+  };
+  readonly longestStreak: {
+    readonly days: number;
+    readonly fromDateKey: string;
+    readonly toDateKey: string;
+  } | null;
+  readonly topSingleDayRun: {
+    readonly animeSn: number;
+    readonly title: string;
+    readonly coverUrl: string | null;
+    readonly dateKey: string;
+    readonly watchCount: number;
+  } | null;
+};
+
+export type MarathonChapter = RecapChapterBase<"marathon", MarathonPayload>;
+
+export type CompletionPayloadRow = Pick<
+  CompletionRow,
+  "animeSn" | "title" | "coverUrl" | "watchedEpisodeCount" | "totalEpisode" | "ratio"
+>;
+
+export type CompletionPayload = {
+  /** Anime with a verifiable contiguous episode structure inside the window. */
+  readonly sampledCount: number;
+  readonly completedCount: number;
+  /** Works the user opened exactly once and never came back to (of >1 total episodes). */
+  readonly tastedCount: number;
+  readonly rows: readonly CompletionPayloadRow[];
+};
+
+export type CompletionChapter = RecapChapterBase<"completion", CompletionPayload>;
+
+export type PlatformTastePayloadRow = {
+  readonly animeSn: number;
+  readonly title: string;
+  readonly coverUrl: string | null;
+  readonly personalWatchRank: number;
+  readonly personalWatchCount: number;
+  readonly platformRank: number;
+  readonly platformPopular: number;
+  /** Positive when the user ranks the work higher than the platform crowd does. */
+  readonly gap: number;
+};
+
+export type PlatformTastePayload = {
+  readonly rows: readonly PlatformTastePayloadRow[];
+  readonly hiddenGem: PlatformTastePayloadRow | null;
+  readonly averageGap: number;
+};
+
+export type PlatformTasteChapter = RecapChapterBase<"platform-taste", PlatformTastePayload>;
+
 export type RecapPresentationChapter =
   | OverviewChapter
   | SeasonBreakdownChapter
+  | HabitClockChapter
+  | MarathonChapter
   | RuntimeChapter
   | TimelinessChapter
   | BehaviorPreferenceChapter
-  | TasteChapter;
+  | TasteChapter
+  | CompletionChapter
+  | PlatformTasteChapter;
 
 export type RecapOmissionReason =
   | "no-watches"
@@ -189,7 +272,11 @@ export type RecapOmissionReason =
   | "insufficient-duration-coverage"
   | "insufficient-timeliness"
   | "insufficient-preference"
-  | "no-taste-dimensions";
+  | "no-taste-dimensions"
+  | "no-habit-clock"
+  | "no-marathon"
+  | "no-completion-structure"
+  | "no-platform-snapshot";
 
 export type RecapChapterOmission = {
   readonly chapter: RecapChapterKind;
@@ -224,10 +311,14 @@ export const buildRecapDeck = (result: AnalyticsResult): RecapPresentationDeck =
   const omissions: RecapChapterOmission[] = [];
   appendOverview(result, chapters, omissions);
   appendSeasonBreakdown(result, chapters, omissions);
+  appendHabitClock(result, chapters, omissions);
+  appendMarathon(result, chapters, omissions);
   appendRuntime(result, chapters, omissions);
   appendTaste(result, chapters, omissions);
+  appendCompletion(result, chapters, omissions);
   appendTimeliness(result, chapters, omissions);
   appendPreference(result, chapters, omissions);
+  appendPlatformTaste(result, chapters, omissions);
 
   const scope: RecapScopePresentation = {
     key: result.period.key,
@@ -267,9 +358,9 @@ const appendOverview = (
   chapters.push({
     id: "overview",
     kind: "overview",
-    title: `${result.summary.watchCount} 次播放，分布在 ${result.summary.activeDayCount} ${activeDayLabel}`,
+    title: `${formatInteger(result.summary.watchCount)} 次播放，分布在 ${formatInteger(result.summary.activeDayCount)} ${activeDayLabel}`,
     eyebrow: result.period.label,
-    narrative: `你看了 ${result.summary.uniqueEpisodeCount} 個不同單集，來自 ${result.summary.animeCount} 部作品。`,
+    narrative: `你看了 ${formatInteger(result.summary.uniqueEpisodeCount)} 個不同單集，來自 ${formatInteger(result.summary.animeCount)} 部作品。`,
     evidence: [
       textEvidence(
         "期間歸類",
@@ -338,8 +429,8 @@ const appendSeasonBreakdown = (
     title,
     eyebrow: `${period.year} 年四季`,
     narrative: leadingRows.length === 1
-      ? `${leader.watchCount} 次觀看，來自 ${leader.animeCount} 部作品。`
-      : `各有 ${leader.watchCount} 次觀看。`,
+      ? `${formatInteger(leader.watchCount)} 次觀看，來自 ${formatInteger(leader.animeCount)} 部作品。`
+      : `各有 ${formatInteger(leader.watchCount)} 次觀看。`,
     evidence: [
       ...rows.map((row) => countEvidence(row.label, row.watchCount, "watch"))
     ],
@@ -350,6 +441,183 @@ const appendSeasonBreakdown = (
     }
   });
 };
+
+const SEGMENT_TITLES: Record<ClockSegment["key"], string> = {
+  "late-night": "你是深夜黨",
+  evening: "晚間是你的黃金檔",
+  daytime: "白天的你看得最勤",
+  morning: "你的一天從動畫開始"
+};
+
+const appendHabitClock = (
+  result: AnalyticsResult,
+  chapters: RecapPresentationChapter[],
+  omissions: RecapChapterOmission[]
+): void => {
+  const clock = result.habitClock;
+  if (!clock.available || !clock.topSegment || !clock.topWeekday || clock.peakHour === null) {
+    omit(omissions, "habit-clock", "no-habit-clock", "這段期間沒有可統計的觀看時間。");
+    return;
+  }
+  const top = clock.topSegment;
+  chapters.push({
+    id: "habit-clock",
+    kind: "habit-clock",
+    title: SEGMENT_TITLES[top.key],
+    eyebrow: "觀看時鐘",
+    narrative: `${formatPercent(top.share)} 的播放落在${top.label}（${top.startHour}:00–${top.endHour}:00），最常按下播放的是${clock.topWeekday.label}。`,
+    evidence: [
+      textEvidence("統計方式", "以每一次播放的台北時間統計，深夜段跨越午夜。"),
+      ...clock.segments.map((segment) =>
+        countEvidence(`${segment.label}（${segment.startHour}:00–${segment.endHour}:00）`, segment.watchCount, "watch")),
+      countEvidence(`高峰時刻 ${clock.peakHour}:00`, clock.peakHourCount, "watch"),
+      countEvidence(`最常觀看的 ${clock.topWeekday.label}`, clock.topWeekday.watchCount, "watch")
+    ],
+    payload: {
+      hourCounts: [...clock.hourCounts],
+      peakHour: clock.peakHour,
+      peakHourCount: clock.peakHourCount,
+      segments: clock.segments.map((segment) => ({ ...segment })),
+      topSegment: { ...top },
+      topWeekday: { ...clock.topWeekday }
+    }
+  });
+};
+
+const dateKeyLabel = (dateKey: string): string => {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return `${year} 年 ${month} 月 ${day} 日`;
+};
+
+const appendMarathon = (
+  result: AnalyticsResult,
+  chapters: RecapPresentationChapter[],
+  omissions: RecapChapterOmission[]
+): void => {
+  const marathon = result.marathon;
+  if (!marathon.available || !marathon.peakDay || marathon.peakDay.watchCount < 2) {
+    omit(omissions, "marathon", "no-marathon", "這段期間沒有值得一提的觀看衝刺。");
+    return;
+  }
+  const peakDay = marathon.peakDay;
+  const streak = marathon.longestStreak;
+  const run = marathon.topSingleDayRun;
+  const narrativeParts = [`${dateKeyLabel(peakDay.dateKey)}${peakDay.knownContentMinutes > 0 ? `，一共 ${formatMinutes(peakDay.knownContentMinutes)}` : ""}。`];
+  if (streak && streak.days >= 2) narrativeParts.push(`最長連續 ${formatInteger(streak.days)} 天，天天都有動畫。`);
+  chapters.push({
+    id: "marathon",
+    kind: "marathon",
+    title: `最猛的一天，你按了 ${formatInteger(peakDay.watchCount)} 次播放`,
+    eyebrow: "觀看馬拉松",
+    narrative: narrativeParts.join(""),
+    evidence: [
+      countEvidence(`單日最高（${dateKeyLabel(peakDay.dateKey)}）`, peakDay.watchCount, "watch"),
+      ...(peakDay.knownContentMinutes > 0 ? [minutesEvidence("當日已知片長", peakDay.knownContentMinutes)] : []),
+      ...(streak ? [countEvidence(`最長連續（${dateKeyLabel(streak.fromDateKey)} 起）`, streak.days, "day")] : []),
+      ...(run ? [countEvidence(`單日單作品最多：${run.title}`, run.watchCount, "episode")] : [])
+    ],
+    payload: {
+      peakDay: { ...peakDay },
+      longestStreak: streak ? { ...streak } : null,
+      topSingleDayRun: run ? { ...run } : null
+    }
+  });
+};
+
+const appendCompletion = (
+  result: AnalyticsResult,
+  chapters: RecapPresentationChapter[],
+  omissions: RecapChapterOmission[]
+): void => {
+  const rows = result.completion.rows;
+  if (!result.completion.available || rows.length === 0) {
+    omit(omissions, "completion", "no-completion-structure", "目前沒有可核對完整集數結構的作品。");
+    return;
+  }
+  const completed = rows.filter((row) => row.ratio >= 1);
+  const tasted = rows.filter((row) => row.watchedEpisodeCount === 1 && row.totalEpisode > 1);
+  const leader = rows[0]!;
+  const title = completed.length > 0
+    ? `你把 ${formatInteger(completed.length)} 部作品完整追完`
+    : `你把《${truncateText(leader.title, STORY_TITLE_LIMIT)}》追到了 ${formatPercent(leader.ratio)}`;
+  const narrative = completed.length > 0
+    ? `可核對集數的 ${formatInteger(rows.length)} 部作品裡${tasted.length > 0 ? `，另外有 ${formatInteger(tasted.length)} 部只淺嚐了一集` : "，一集不漏"}。`
+    : `在這段期間內，可核對集數的作品共 ${formatInteger(rows.length)} 部。`;
+  chapters.push({
+    id: "completion",
+    kind: "completion",
+    title,
+    eyebrow: "完食清單",
+    narrative,
+    evidence: [
+      textEvidence("統計方式", "只統計期間內能核對完整集數結構的作品；完成度以本期間看過的不同集數計。"),
+      countEvidence("可核對的作品", rows.length, "anime"),
+      countEvidence("完整看完", completed.length, "anime"),
+      countEvidence("只看了一集", tasted.length, "anime"),
+      ...rows.slice(0, 3).map((row) =>
+        ratioEvidence(row.title, row.watchedEpisodeCount, row.totalEpisode, row.ratio))
+    ],
+    payload: {
+      sampledCount: rows.length,
+      completedCount: completed.length,
+      tastedCount: tasted.length,
+      rows: rows.slice(0, 4).map(copyCompletionRow)
+    }
+  });
+};
+
+const appendPlatformTaste = (
+  result: AnalyticsResult,
+  chapters: RecapPresentationChapter[],
+  omissions: RecapChapterOmission[]
+): void => {
+  const comparison = result.currentPlatformSnapshotComparison;
+  if (!comparison.available || comparison.rows.length < 2) {
+    omit(omissions, "platform-taste", "no-platform-snapshot", "目前平台人氣快照的資料不足以做對照。");
+    return;
+  }
+  const rows = comparison.rows.slice(0, MAX_RANKED_ROWS).map((row): PlatformTastePayloadRow => ({
+    animeSn: row.animeSn,
+    title: row.title,
+    coverUrl: row.coverUrl,
+    personalWatchRank: row.personalWatchRank,
+    personalWatchCount: row.personalWatchCount,
+    platformRank: row.platformPopularityRankWithinCoveredAnime,
+    platformPopular: row.platformPopular,
+    gap: row.platformPopularityRankWithinCoveredAnime - row.personalWatchRank
+  }));
+  const hiddenGem = rows.reduce<PlatformTastePayloadRow | null>(
+    (best, row) => row.gap > (best?.gap ?? 0) ? row : best,
+    null
+  );
+  const averageGap = rows.reduce((sum, row) => sum + row.gap, 0) / rows.length;
+  chapters.push({
+    id: "platform-taste",
+    kind: "platform-taste",
+    title: hiddenGem
+      ? `《${truncateText(hiddenGem.title, STORY_TITLE_LIMIT)}》是你的私藏`
+      : "你的口味和平台幾乎同步",
+    eyebrow: "和平台比一比",
+    narrative: hiddenGem
+      ? `它在你的排行是第 ${formatInteger(hiddenGem.personalWatchRank)} 名，平台人氣卻只排第 ${formatInteger(hiddenGem.platformRank)} 名。`
+      : "你最常看的，平台上的大家也在看。",
+    evidence: [
+      textEvidence("統計方式", "以目前平台人氣快照，和你在這段期間的觀看排行對照。"),
+      ...rows.slice(0, 4).map((row) =>
+        textEvidence(row.title, `你 #${formatInteger(row.personalWatchRank)}・平台 #${formatInteger(row.platformRank)}`))
+    ],
+    payload: { rows, hiddenGem, averageGap }
+  });
+};
+
+const copyCompletionRow = (row: CompletionRow): CompletionPayloadRow => ({
+  animeSn: row.animeSn,
+  title: row.title,
+  coverUrl: row.coverUrl,
+  watchedEpisodeCount: row.watchedEpisodeCount,
+  totalEpisode: row.totalEpisode,
+  ratio: row.ratio
+});
 
 const appendRuntime = (
   result: AnalyticsResult,
@@ -387,7 +655,7 @@ const appendRuntime = (
   chapters.push({
     id: "runtime",
     kind: "runtime",
-    title: `片長最多的是《${leader.title}》`,
+    title: `片長最長的是《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
     eyebrow: "觀看片長排行",
     narrative: `${formatMinutes(leader.contentMinutes)}；觀看片長合計 ${formatMinutes(result.summary.knownContentMinutes)}。`,
     evidence: [
@@ -432,7 +700,7 @@ const appendTimeliness = (
   chapters.push({
     id: "timeliness",
     kind: "timeliness",
-    title: `你追得最快的是《${leader.title}》`,
+    title: `你追得最快的是《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
     eyebrow: "上架後多久會看",
     narrative: `通常等 ${formatMinutes(leader.medianLagMinutes)}。`,
     evidence: [
@@ -484,9 +752,9 @@ const appendPreference = (
   chapters.push({
     id: "behavior-preference",
     kind: "behavior-preference",
-    title: `有得選時，你最常先看《${leader.title}》`,
+    title: `有得選時，你最常先看《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
     eyebrow: "你的選擇",
-    narrative: `${leader.comparisons} 次比較裡，你有 ${leader.wins} 次先看它。`,
+    narrative: `${formatInteger(leader.comparisons)} 次比較裡，你有 ${formatInteger(leader.wins)} 次先看它。`,
     evidence: [
       textEvidence("比較方式", "只比較你已經開始追、當時都有新集數可看的作品。"),
       ratioEvidence(
@@ -534,9 +802,9 @@ const appendTaste = (
   chapters.push({
     id: "taste",
     kind: "taste",
-    title: `「${leader.label}」最常出現在你的片單`,
+    title: `「${truncateText(leader.label, 16)}」最常出現在你的片單`,
     eyebrow: `最常看的${leaderKind}`,
-    narrative: `共 ${leader.watchCount} 次觀看。`,
+    narrative: `共 ${formatInteger(leader.watchCount)} 次觀看。`,
     evidence: [
       ratioEvidence(
         "作品資料涵蓋",
@@ -638,9 +906,9 @@ const omit = (
 const formatMinutes = (minutes: number): string => {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
-  if (hours === 0) return `${minutes} 分鐘`;
-  if (remainder === 0) return `${hours} 小時`;
-  return `${hours} 小時 ${remainder} 分鐘`;
+  if (hours === 0) return `${formatInteger(minutes)} 分鐘`;
+  if (remainder === 0) return `${formatInteger(hours)} 小時`;
+  return `${formatInteger(hours)} 小時 ${formatInteger(remainder)} 分鐘`;
 };
 
 const formatChineseList = (items: readonly string[]): string => {

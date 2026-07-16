@@ -60,3 +60,10 @@ export const formatHalfOpenRange = (startInclusive: Date, endExclusive: Date): s
 const stripTrailingZero = (value: number): string => new Intl.NumberFormat("zh-TW", {
   maximumFractionDigits: 1
 }).format(value);
+
+/** Clamps display copy (titles woven into sentences) so one runaway string can't bury the layout. */
+export const truncateText = (text: string, maxCharacters: number): string => {
+  const characters = [...text];
+  if (characters.length <= maxCharacters) return text;
+  return `${characters.slice(0, Math.max(1, maxCharacters - 1)).join("").trimEnd()}…`;
+};

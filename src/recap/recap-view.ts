@@ -4,7 +4,8 @@ import {
   formatDuration,
   formatInteger,
   formatLag,
-  formatPercent
+  formatPercent,
+  truncateText
 } from "../analysis-format";
 import { createButton, createCover, element, textElement } from "../view-dom";
 import {
@@ -41,6 +42,7 @@ export const renderRecapSurface = (options: RecapSurfaceRenderOptions): HTMLElem
 const renderIntro = (options: RecapSurfaceRenderOptions): HTMLElement => {
   const deck = buildRecapDeck(options.result);
   const root = element("section", "ani-recap-intro");
+  root.dataset.viewId = "intro";
   root.append(renderBackdrop());
 
   const content = element("div", "ani-recap-intro-content");
@@ -104,6 +106,7 @@ const renderChapterStage = (options: RecapSurfaceRenderOptions): HTMLElement => 
   const index = options.state.deck.chapters.indexOf(chapter);
   const stage = stageShell();
   stage.dataset.chapter = chapter.kind;
+  stage.dataset.viewId = chapter.id;
   stage.dataset.transition = options.state.transition.phase === "running"
     ? options.state.transition.direction
     : "idle";
@@ -144,6 +147,7 @@ const renderEvidenceStage = (options: RecapSurfaceRenderOptions): HTMLElement =>
   const index = options.state.deck.chapters.indexOf(chapter);
   const stage = stageShell();
   stage.dataset.chapter = chapter.kind;
+  stage.dataset.viewId = chapter.id;
   stage.append(renderPlaybackChrome(options.state.deck, index, options.state.stale));
 
   const veil = element("div", "ani-recap-evidence-veil");
@@ -175,6 +179,7 @@ const renderOutro = (options: RecapSurfaceRenderOptions): HTMLElement => {
   const deck = options.state.deck;
   const stage = stageShell();
   stage.classList.add("ani-recap-outro");
+  stage.dataset.viewId = "outro";
   const takeaway = recapTakeaway(deck);
   stage.dataset.chapter = takeaway.kind;
   stage.dataset.transition = options.state.transition.phase === "running"
@@ -231,9 +236,21 @@ const renderChapterPayload = (chapter: RecapPresentationChapter): HTMLElement =>
     case "overview": {
       const grid = element("div", "ani-recap-metric-grid");
       const activeDayLabel = chapter.payload.axis === "released-at" ? "上架日" : "觀看日";
+      // 沒有重看時「觀看」和「不同單集」是同一個數字，重複的卡片換成日均密度。
+      const rewatchCount = chapter.payload.watchCount - chapter.payload.uniqueEpisodeCount;
+      const secondMetric = rewatchCount > 0
+        ? metric("重看", rewatchCount, "次")
+        : textMetric(
+            `平均每個${activeDayLabel}`,
+            chapter.payload.activeDayCount > 0
+              ? new Intl.NumberFormat("zh-TW", { maximumFractionDigits: 1 })
+                  .format(chapter.payload.watchCount / chapter.payload.activeDayCount)
+              : "—",
+            "次"
+          );
       grid.append(
         metric("觀看", chapter.payload.watchCount, "次"),
-        metric("不同單集", chapter.payload.uniqueEpisodeCount, "集"),
+        secondMetric,
         metric("作品", chapter.payload.identifiableAnimeCount, "部"),
         metric(activeDayLabel, chapter.payload.activeDayCount, "天")
       );
@@ -282,7 +299,7 @@ const renderChapterPayload = (chapter: RecapPresentationChapter): HTMLElement =>
         layout.append(textElement(
           "p",
           "ani-recap-story-note",
-          `最長單集是《${chapter.payload.longestEpisode.title}》${chapter.payload.longestEpisode.episode}，${formatDuration(chapter.payload.longestEpisode.durationMinutes)}。`
+          `最長單集是《${truncateText(chapter.payload.longestEpisode.title, 28)}》${chapter.payload.longestEpisode.episode}，${formatDuration(chapter.payload.longestEpisode.durationMinutes)}。`
         ));
       }
       return layout;
@@ -334,6 +351,138 @@ const renderChapterPayload = (chapter: RecapPresentationChapter): HTMLElement =>
           value: formatPercent(row.rawWinRate),
           meta: `${formatInteger(row.wins)} 次先看／${formatInteger(row.comparisons)} 次比較`,
           level: row.rawWinRate
+        }));
+      }
+      layout.append(rows);
+      return layout;
+    }
+    case "habit-clock": {
+      const layout = element("div", "ani-recap-payload-stack");
+      const top = chapter.payload.topSegment;
+      layout.append(bigMetric(
+        formatPercent(top.share),
+        `${top.label}（${top.startHour}:00–${top.endHour}:00）佔你所有播放的比例`
+      ));
+      const clock = element("div", "ani-recap-clock");
+      const bars = element("div", "ani-recap-clock-bars");
+      bars.setAttribute("aria-hidden", "true");
+      const max = Math.max(1, ...chapter.payload.hourCounts);
+      chapter.payload.hourCounts.forEach((count, hour) => {
+        const bar = element("span", "ani-recap-clock-bar");
+        bar.style.setProperty("--rc-level", String(count / max));
+        bar.style.setProperty("--rc-i", String(hour));
+        bar.dataset.peak = String(hour === chapter.payload.peakHour);
+        bar.title = `${hour}:00 · ${formatInteger(count)} 次`;
+        bars.append(bar);
+      });
+      const labels = element("div", "ani-recap-clock-labels");
+      for (const hour of [0, 6, 12, 18, 24]) {
+        labels.append(textElement("span", "", `${String(hour % 24).padStart(2, "0")}`));
+      }
+      labels.setAttribute("aria-hidden", "true");
+      clock.append(bars, labels);
+      layout.append(clock);
+      layout.append(textElement(
+        "p",
+        "ani-recap-story-note",
+        `高峰在 ${chapter.payload.peakHour}:00（${formatInteger(chapter.payload.peakHourCount)} 次）；一週之中，${chapter.payload.topWeekday.label}最常按下播放（${formatInteger(chapter.payload.topWeekday.watchCount)} 次）。`
+      ));
+      return layout;
+    }
+    case "marathon": {
+      const layout = element("div", "ani-recap-payload-stack");
+      const peakDay = chapter.payload.peakDay;
+      layout.append(bigMetric(
+        `${formatInteger(peakDay.watchCount)} 次播放`,
+        `${formatDateKey(peakDay.dateKey)} · 單日最高紀錄`
+      ));
+      const streak = chapter.payload.longestStreak;
+      if (streak) {
+        const summary = element("div", "ani-recap-outro-summary ani-recap-marathon-facts");
+        const streakFact = element("div", "ani-recap-outro-fact");
+        streakFact.append(
+          textElement("strong", "", `${formatInteger(streak.days)} 天`),
+          textElement("span", "", "最長連續觀看")
+        );
+        summary.append(streakFact);
+        if (peakDay.knownContentMinutes > 0) {
+          const minutesFact = element("div", "ani-recap-outro-fact");
+          minutesFact.append(
+            textElement("strong", "", formatCompactDuration(peakDay.knownContentMinutes)),
+            textElement("span", "", "當日已知片長")
+          );
+          summary.append(minutesFact);
+        }
+        layout.append(summary);
+      }
+      const run = chapter.payload.topSingleDayRun;
+      if (run) {
+        const feature = element("div", "ani-recap-preference-leader");
+        feature.append(
+          createCover(run.coverUrl, run.title, "ani-recap-leader-cover"),
+          textElement("span", "ani-recap-leader-label", "當日主力"),
+          textElement("strong", "ani-recap-leader-title", run.title),
+          textElement("span", "ani-recap-leader-value", `一天連看 ${formatInteger(run.watchCount)} 集 · ${formatDateKey(run.dateKey)}`)
+        );
+        layout.append(feature);
+      }
+      return layout;
+    }
+    case "completion": {
+      const layout = element("div", "ani-recap-payload-stack");
+      const leader = chapter.payload.rows[0];
+      layout.append(chapter.payload.completedCount > 0
+        ? bigMetric(
+            `${formatInteger(chapter.payload.completedCount)} 部完食`,
+            `可核對完整集數的 ${formatInteger(chapter.payload.sampledCount)} 部作品中`,
+            chapter.payload.completedCount
+          )
+        : bigMetric(
+            leader ? formatPercent(leader.ratio) : "—",
+            leader ? `最接近完食：${leader.title}` : "沒有可核對的作品"
+          ));
+      const rows = element("div", "ani-recap-story-ranking");
+      chapter.payload.rows.forEach((row, index) => {
+        rows.append(storyRankingRow({
+          rank: index + 1,
+          title: row.title,
+          coverUrl: row.coverUrl,
+          value: formatPercent(row.ratio),
+          meta: `${formatInteger(row.watchedEpisodeCount)} / ${formatInteger(row.totalEpisode)} 集`,
+          level: row.ratio
+        }));
+      });
+      layout.append(rows);
+      if (chapter.payload.tastedCount > 0) {
+        layout.append(textElement(
+          "p",
+          "ani-recap-story-note",
+          `另外有 ${formatInteger(chapter.payload.tastedCount)} 部只看了一集，就拋之腦後了。`
+        ));
+      }
+      return layout;
+    }
+    case "platform-taste": {
+      const layout = element("div", "ani-recap-payload-stack");
+      const gem = chapter.payload.hiddenGem;
+      if (gem) {
+        const feature = element("div", "ani-recap-preference-leader");
+        feature.append(
+          createCover(gem.coverUrl, gem.title, "ani-recap-leader-cover"),
+          textElement("span", "ani-recap-leader-label", "你的私藏"),
+          textElement("strong", "ani-recap-leader-title", gem.title),
+          textElement("span", "ani-recap-leader-value", `你的排行 #${formatInteger(gem.personalWatchRank)} · 平台人氣 #${formatInteger(gem.platformRank)}`)
+        );
+        layout.append(feature);
+      }
+      const rows = element("div", "ani-recap-story-ranking");
+      for (const row of chapter.payload.rows) {
+        rows.append(storyRankingRow({
+          rank: row.personalWatchRank,
+          title: row.title,
+          coverUrl: row.coverUrl,
+          value: `平台 #${formatInteger(row.platformRank)}`,
+          meta: `${formatInteger(row.personalWatchCount)} 次觀看 · 平台人氣 ${formatInteger(row.platformPopular)}`
         }));
       }
       layout.append(rows);
@@ -414,6 +563,30 @@ const renderPlaybackActions = ({
   return actions;
 };
 
+/**
+ * Turns the previous recap root into a transient exit "ghost": it overlays the
+ * incoming stage, dissolves along the travel direction, and removes itself.
+ * The caller re-appends the returned node after mounting the new stage.
+ */
+export const createRecapGhost = (
+  previousRoot: HTMLElement,
+  direction: "forward" | "backward"
+): HTMLElement => {
+  previousRoot.classList.add("ani-recap-ghost");
+  previousRoot.dataset.ghost = direction;
+  previousRoot.setAttribute("aria-hidden", "true");
+  previousRoot.setAttribute("inert", "");
+  const remove = (): void => previousRoot.remove();
+  previousRoot.addEventListener("animationend", (event) => {
+    if (event.target === previousRoot) remove();
+  });
+  // 若退場動畫根本沒掛上（例如樣式被停用），下一個 frame 直接移除，避免殘留遮擋。
+  requestAnimationFrame(() => {
+    if (previousRoot.isConnected && previousRoot.getAnimations().length === 0) remove();
+  });
+  return previousRoot;
+};
+
 const stageShell = (): HTMLElement => {
   const stage = element("section", "ani-recap-stage");
   stage.tabIndex = -1;
@@ -478,20 +651,24 @@ const meterBar = (level: number, className = ""): HTMLElement => {
 
 const tasteColumn = (
   title: string,
-  rows: readonly { readonly label: string; readonly watchCount: number }[]
+  rows: readonly { readonly label: string; readonly watchCount: number; readonly animeCount?: number }[]
 ): HTMLElement => {
   const card = element("section", "ani-recap-taste-column");
   card.append(textElement("h4", "", title));
   const list = element("ol");
-  const max = Math.max(1, ...rows.map((row) => row.watchCount));
-  for (const row of rows.slice(0, 5)) {
+  const shown = rows.slice(0, 5);
+  const max = Math.max(1, ...shown.map((row) => row.watchCount));
+  // 每列都只來自一部作品時（常見於導演），等長的 bar 沒有資訊，省下來。
+  const meaningfulBars = shown.some((row) => (row.animeCount ?? 2) > 1);
+  for (const row of shown) {
     const item = element("li");
     const head = element("div", "ani-recap-taste-line");
     head.append(
       textElement("span", "", row.label),
       textElement("strong", "", `${formatInteger(row.watchCount)} 次`)
     );
-    item.append(head, meterBar(row.watchCount / max));
+    item.append(head);
+    if (meaningfulBars) item.append(meterBar(row.watchCount / max));
     list.append(item);
   }
   card.append(list);
@@ -510,6 +687,16 @@ const metric = (label: string, value: number, unit: string): HTMLElement => {
   return card;
 };
 
+const textMetric = (label: string, value: string, unit: string): HTMLElement => {
+  const card = element("article", "ani-recap-metric");
+  card.append(
+    textElement("span", "ani-recap-metric-label", label),
+    textElement("strong", "ani-recap-metric-value", value),
+    textElement("span", "ani-recap-metric-unit", unit)
+  );
+  return card;
+};
+
 const bigMetric = (
   value: string,
   caption: string,
@@ -518,6 +705,7 @@ const bigMetric = (
 ): HTMLElement => {
   const block = element("div", "ani-recap-big-metric");
   const strong = textElement("strong", "", value);
+  if ([...value].length > 12) strong.dataset.long = "true";
   if (countTo !== undefined) {
     strong.dataset.countTo = String(countTo);
     if (countFormat) strong.dataset.countFormat = countFormat;
@@ -585,6 +773,12 @@ const outroFacts = (deck: RecapPresentationDeck): readonly OutroFact[] => {
         countFormat: "compact-duration"
       });
     }
+    if (chapter.kind === "marathon" && chapter.payload.longestStreak) {
+      facts.push({
+        label: "最長連續",
+        value: `${formatInteger(chapter.payload.longestStreak.days)} 天`
+      });
+    }
     if (chapter.kind === "timeliness") {
       facts.push({ label: "通常等待", value: formatLag(chapter.payload.overallMedianLagMinutes) });
     }
@@ -603,8 +797,8 @@ const formatEvidenceValue = (row: RecapEvidenceRow): string => {
     case "count": return `${formatInteger(row.value)} ${evidenceUnit(row.unit)}`;
     case "minutes": return formatDuration(row.minutes);
     case "ratio": return row.ratio === null
-      ? `${row.numerator} / ${row.denominator}`
-      : `${row.numerator} / ${row.denominator}（${formatPercent(row.ratio)}）`;
+      ? `${formatInteger(row.numerator)} / ${formatInteger(row.denominator)}`
+      : `${formatInteger(row.numerator)} / ${formatInteger(row.denominator)}（${formatPercent(row.ratio)}）`;
     case "text": return row.value;
   }
 };
@@ -631,8 +825,12 @@ const recapTakeaway = (
   const priority: readonly RecapPresentationChapter["kind"][] = [
     "behavior-preference",
     "timeliness",
+    "marathon",
+    "completion",
     "runtime",
+    "habit-clock",
     "taste",
+    "platform-taste",
     "season-breakdown",
     "overview"
   ];
@@ -645,6 +843,11 @@ const recapTakeaway = (
     title: "這段期間沒有觀看紀錄",
     narrative: "換一個期間，再看看你的觀看習慣。"
   };
+};
+
+const formatDateKey = (dateKey: string): string => {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return `${year} 年 ${month} 月 ${day} 日`;
 };
 
 const recapTitle = (result: AnalyticsResult): string => {
@@ -736,10 +939,14 @@ export const recapCss = `
 .ani-recap-intro { border-radius: 22px; box-shadow: var(--ani-shadow-2); }
 .ani-recap-stage[data-chapter="overview"] { --rc-accent: #7dd3fc; }
 .ani-recap-stage[data-chapter="season-breakdown"] { --rc-accent: #5eead4; }
+.ani-recap-stage[data-chapter="habit-clock"] { --rc-accent: #a5b4fc; }
+.ani-recap-stage[data-chapter="marathon"] { --rc-accent: #fda4af; }
 .ani-recap-stage[data-chapter="runtime"] { --rc-accent: #c4b5fd; }
 .ani-recap-stage[data-chapter="taste"] { --rc-accent: #f9a8d4; }
+.ani-recap-stage[data-chapter="completion"] { --rc-accent: #bef264; }
 .ani-recap-stage[data-chapter="timeliness"] { --rc-accent: #6ee7b7; }
 .ani-recap-stage[data-chapter="behavior-preference"] { --rc-accent: #fcd34d; }
+.ani-recap-stage[data-chapter="platform-taste"] { --rc-accent: #f0abfc; }
 .ani-recap-backdrop { position: absolute; z-index: -2; inset: 0; overflow: hidden; background:
   radial-gradient(110% 84% at 86% -18%, color-mix(in srgb, var(--rc-accent) 17%, transparent), transparent 56%),
   radial-gradient(92% 70% at -12% 112%, color-mix(in srgb, var(--rc-accent) 9%, transparent), transparent 60%),
@@ -753,12 +960,12 @@ export const recapCss = `
   radial-gradient(125% 105% at 50% 38%, transparent 58%, rgba(2, 4, 10, .5) 100%); }
 .ani-recap-eyebrow { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--rc-accent); font-size: 11px; font-weight: 900; letter-spacing: .24em; text-transform: uppercase; }
 .ani-recap-eyebrow::before { content: ""; width: 22px; height: 2px; border-radius: 999px; background: var(--rc-accent); }
-.ani-recap-title-em { font-style: normal; color: var(--rc-accent); }
-.ani-recap-intro-title { margin: 18px 0 0; max-inline-size: 14em; color: var(--rc-ink); font-size: clamp(38px, 5.6vw, 76px); font-weight: 900; letter-spacing: -.02em; line-height: 1.1; text-wrap: balance; }
-.ani-recap-chapter-title { margin: 16px 0 0; max-inline-size: 16em; color: var(--rc-ink); font-size: clamp(30px, 4.2vw, 56px); font-weight: 900; letter-spacing: -.015em; line-height: 1.16; text-wrap: balance; }
-.ani-recap-outro-title { margin: 18px 0 0; max-inline-size: 18em; color: var(--rc-ink); font-size: clamp(32px, 4.6vw, 60px); font-weight: 900; letter-spacing: -.015em; line-height: 1.16; text-wrap: balance; }
+.ani-recap-title-em { display: inline-block; max-inline-size: 100%; font-style: normal; color: var(--rc-accent); text-wrap: balance; }
+.ani-recap-intro-title { margin: 18px 0 0; max-inline-size: 14em; color: var(--rc-ink); font-size: clamp(38px, 5.6vw, 76px); font-weight: 900; letter-spacing: -.02em; line-height: 1.1; text-wrap: balance; overflow-wrap: anywhere; }
+.ani-recap-chapter-title { margin: 16px 0 0; max-inline-size: 16em; color: var(--rc-ink); font-size: clamp(30px, 4.2vw, 56px); font-weight: 900; letter-spacing: -.015em; line-height: 1.16; text-wrap: balance; overflow-wrap: anywhere; }
+.ani-recap-outro-title { margin: 18px 0 0; max-inline-size: 18em; color: var(--rc-ink); font-size: clamp(32px, 4.6vw, 60px); font-weight: 900; letter-spacing: -.015em; line-height: 1.16; text-wrap: balance; overflow-wrap: anywhere; }
 .ani-recap-intro-title:focus, .ani-recap-chapter-title:focus, .ani-recap-outro-title:focus { outline: none; }
-.ani-recap-intro-lede, .ani-recap-narrative { max-inline-size: 27em; margin: 18px 0 0; color: var(--rc-ink-2); font-size: clamp(14px, 1.6vw, 17px); line-height: 1.9; text-wrap: pretty; }
+.ani-recap-intro-lede, .ani-recap-narrative { max-inline-size: 27em; margin: 18px 0 0; color: var(--rc-ink-2); font-size: clamp(14px, 1.6vw, 17px); line-height: 1.9; text-wrap: pretty; overflow-wrap: anywhere; }
 .ani-recap-intro-content { align-self: center; display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, .88fr); align-items: center; gap: clamp(26px, 5vw, 70px); width: min(100%, 1180px); margin-inline: auto; padding: clamp(34px, 7vw, 84px) clamp(22px, 6vw, 72px); }
 .ani-recap-intro-content[data-poster="false"] { grid-template-columns: minmax(0, 1fr); }
 .ani-recap-intro-copy { min-width: 0; }
@@ -770,9 +977,21 @@ export const recapCss = `
 .ani-recap-intro-poster { position: relative; height: min(48vh, 440px); min-width: 0; }
 .ani-recap-poster-cover { position: absolute; overflow: hidden; width: clamp(150px, 15vw, 208px); aspect-ratio: 3 / 4; border: 1px solid rgba(255, 255, 255, .12); border-radius: 16px; background: var(--rc-surface-strong); box-shadow: 0 30px 70px rgba(0, 0, 0, .55); }
 .ani-recap-poster-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ani-recap-poster-cover { opacity: var(--rc-poster-opacity, 1); }
 .ani-recap-poster-cover:nth-child(1) { z-index: 3; top: 6%; right: 10%; transform: rotate(5deg); animation: ani-recap-float 7s ease-in-out infinite alternate; }
 .ani-recap-poster-cover:nth-child(2) { z-index: 2; top: 30%; left: 4%; transform: rotate(-7deg); animation: ani-recap-float 8s ease-in-out .6s infinite alternate-reverse; }
-.ani-recap-poster-cover:nth-child(3) { z-index: 1; bottom: 0; right: 34%; opacity: .88; transform: rotate(2deg); animation: ani-recap-float 9s ease-in-out 1.1s infinite alternate; }
+.ani-recap-poster-cover:nth-child(3) { z-index: 1; bottom: 0; right: 34%; transform: rotate(2deg); animation: ani-recap-float 9s ease-in-out 1.1s infinite alternate; --rc-poster-opacity: .88; }
+/* 進場編排只在剛抵達 intro 時播一次（data-enter 由 analysis-view 決定）；
+   背景資料更新造成的 re-render 不會重播，避免內容閃爍。 */
+.ani-recap-intro[data-enter="true"] .ani-recap-poster-cover:nth-child(1) { animation: ani-recap-poster-pop 640ms var(--ani-ease-out) 260ms both, ani-recap-float 7s ease-in-out infinite alternate; }
+.ani-recap-intro[data-enter="true"] .ani-recap-poster-cover:nth-child(2) { animation: ani-recap-poster-pop 640ms var(--ani-ease-out) 380ms both, ani-recap-float 8s ease-in-out .6s infinite alternate-reverse; }
+.ani-recap-intro[data-enter="true"] .ani-recap-poster-cover:nth-child(3) { animation: ani-recap-poster-pop 640ms var(--ani-ease-out) 500ms both, ani-recap-float 9s ease-in-out 1.1s infinite alternate; }
+.ani-recap-intro[data-enter="true"] .ani-recap-intro-copy > * { animation: ani-recap-content-rise 560ms var(--ani-ease-out) both; }
+.ani-recap-intro[data-enter="true"] .ani-recap-intro-copy > *:nth-child(1) { animation-delay: 40ms; }
+.ani-recap-intro[data-enter="true"] .ani-recap-intro-copy > *:nth-child(2) { animation-delay: 110ms; }
+.ani-recap-intro[data-enter="true"] .ani-recap-intro-copy > *:nth-child(3) { animation-delay: 190ms; }
+.ani-recap-intro[data-enter="true"] .ani-recap-intro-copy > *:nth-child(4) { animation-delay: 270ms; }
+.ani-recap-intro[data-enter="true"] .ani-recap-intro-copy > *:nth-child(n + 5) { animation-delay: 350ms; }
 .ani-recap-primary-button, .ani-recap-ghost-button, .ani-recap-evidence-button { min-height: 44px; border-radius: var(--ani-r-pill); cursor: pointer; font: inherit; font-size: 12px; font-weight: 900; padding: 10px 20px; transition: transform var(--ani-dur-1) var(--ani-ease), background var(--ani-dur-1) var(--ani-ease), box-shadow var(--ani-dur-1) var(--ani-ease); }
 .ani-recap-primary-button { border: 0; background: #f4f7ff; color: #0a1120; box-shadow: 0 14px 34px rgba(2, 6, 18, .5); }
 .ani-recap-primary-button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 18px 40px rgba(2, 6, 18, .6), 0 0 24px color-mix(in srgb, var(--rc-accent) 32%, transparent); }
@@ -780,18 +999,37 @@ export const recapCss = `
 .ani-recap-ghost-button:hover:not(:disabled), .ani-recap-evidence-button:hover:not(:disabled) { background: rgba(148, 173, 229, .14); color: var(--rc-ink); }
 .ani-recap-primary-button:disabled, .ani-recap-ghost-button:disabled, .ani-recap-evidence-button:disabled { cursor: wait; opacity: .5; }
 .ani-recap-stage { height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto; }
-.ani-recap-stage[data-transition="forward"] { animation: ani-recap-enter-forward 560ms var(--ani-ease-out) both; }
-.ani-recap-stage[data-transition="backward"] { animation: ani-recap-enter-backward 560ms var(--ani-ease-out) both; }
-.ani-recap-stage[data-transition="forward"] .ani-recap-chapter-copy > *, .ani-recap-stage[data-transition="backward"] .ani-recap-chapter-copy > * { animation: ani-recap-content-rise 460ms var(--ani-ease-out) both; }
-.ani-recap-stage[data-transition] .ani-recap-chapter-copy > *:nth-child(1) { animation-delay: 50ms; }
-.ani-recap-stage[data-transition] .ani-recap-chapter-copy > *:nth-child(2) { animation-delay: 110ms; }
-.ani-recap-stage[data-transition] .ani-recap-chapter-copy > *:nth-child(3) { animation-delay: 180ms; }
-.ani-recap-stage[data-transition="forward"] .ani-recap-chapter-visual, .ani-recap-stage[data-transition="backward"] .ani-recap-chapter-visual { animation: ani-recap-content-rise 520ms var(--ani-ease-out) 230ms both; }
-.ani-recap-stage[data-transition="forward"] .ani-recap-outro-content > *, .ani-recap-stage[data-transition="backward"] .ani-recap-outro-content > * { animation: ani-recap-content-rise 460ms var(--ani-ease-out) both; }
-.ani-recap-stage[data-transition] .ani-recap-outro-content > *:nth-child(1) { animation-delay: 50ms; }
-.ani-recap-stage[data-transition] .ani-recap-outro-content > *:nth-child(2) { animation-delay: 110ms; }
-.ani-recap-stage[data-transition] .ani-recap-outro-content > *:nth-child(3) { animation-delay: 180ms; }
-.ani-recap-stage[data-transition] .ani-recap-outro-content > *:nth-child(n + 4) { animation-delay: 240ms; }
+/* 950ms 同時是完成 gate：對齊內容 cascade 的結尾，避免 idle re-render 在動畫中途發生。 */
+.ani-recap-stage[data-transition="forward"] { animation: ani-recap-enter-forward 950ms var(--ani-ease-out) both; }
+.ani-recap-stage[data-transition="backward"] { animation: ani-recap-enter-backward 950ms var(--ani-ease-out) both; }
+/* 舊章節的退場 ghost：疊在新章節上方，往行進方向溶出後自我移除。 */
+.ani-recap-ghost { position: absolute !important; inset: 0; z-index: 6; pointer-events: none; }
+.ani-recap-ghost[data-ghost="forward"] { animation: ani-recap-ghost-forward 460ms var(--ani-ease) both !important; }
+.ani-recap-ghost[data-ghost="backward"] { animation: ani-recap-ghost-backward 460ms var(--ani-ease) both !important; }
+/* 文案欄依方向流動：往前是由下往上，往後是由上往下，與舞台位移一致。 */
+.ani-recap-stage[data-transition="forward"] .ani-recap-chapter-copy > * { animation: ani-recap-content-rise 520ms var(--ani-ease-out) both; }
+.ani-recap-stage[data-transition="backward"] .ani-recap-chapter-copy > * { animation: ani-recap-content-fall 520ms var(--ani-ease-out) both; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-chapter-copy > *:nth-child(1) { animation-delay: 60ms; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-chapter-copy > *:nth-child(2) { animation-delay: 130ms; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-chapter-copy > *:nth-child(3) { animation-delay: 210ms; }
+/* 視覺欄逐項進場：卡片、排行列、註記各自接力，而不是整塊一次浮起。 */
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) :is(.ani-recap-metric, .ani-recap-season-card, .ani-recap-taste-column, .ani-recap-big-metric, .ani-recap-preference-leader, .ani-recap-ranking-row, .ani-recap-story-note, .ani-recap-outro-fact) {
+  animation: ani-recap-content-rise 540ms var(--ani-ease-out) both;
+  animation-delay: calc(230ms + var(--rc-stagger, 0) * 55ms);
+}
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) :is(.ani-recap-metric, .ani-recap-season-card, .ani-recap-taste-column, .ani-recap-big-metric, .ani-recap-preference-leader, .ani-recap-ranking-row, .ani-recap-story-note, .ani-recap-outro-fact):nth-child(2) { --rc-stagger: 1; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) :is(.ani-recap-metric, .ani-recap-season-card, .ani-recap-taste-column, .ani-recap-big-metric, .ani-recap-preference-leader, .ani-recap-ranking-row, .ani-recap-story-note, .ani-recap-outro-fact):nth-child(3) { --rc-stagger: 2; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) :is(.ani-recap-metric, .ani-recap-season-card, .ani-recap-taste-column, .ani-recap-big-metric, .ani-recap-preference-leader, .ani-recap-ranking-row, .ani-recap-story-note, .ani-recap-outro-fact):nth-child(4) { --rc-stagger: 3; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) :is(.ani-recap-metric, .ani-recap-season-card, .ani-recap-taste-column, .ani-recap-big-metric, .ani-recap-preference-leader, .ani-recap-ranking-row, .ani-recap-story-note, .ani-recap-outro-fact):nth-child(n + 5) { --rc-stagger: 4; }
+.ani-recap-stage[data-transition="forward"] .ani-recap-outro-content > * { animation: ani-recap-content-rise 520ms var(--ani-ease-out) both; }
+.ani-recap-stage[data-transition="backward"] .ani-recap-outro-content > * { animation: ani-recap-content-fall 520ms var(--ani-ease-out) both; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-outro-content > *:nth-child(1) { animation-delay: 60ms; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-outro-content > *:nth-child(2) { animation-delay: 130ms; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-outro-content > *:nth-child(3) { animation-delay: 210ms; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-outro-content > *:nth-child(n + 4) { animation-delay: 280ms; }
+/* summary 容器不動，讓裡面的卡片自己接力，避免被父層的淡入蓋住節奏。 */
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-outro-content > .ani-recap-outro-summary { animation: none; }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-outro-summary .ani-recap-outro-fact { animation-delay: calc(300ms + var(--rc-stagger, 0) * 60ms); }
 .ani-recap-chrome { position: relative; z-index: 2; display: grid; gap: 9px; width: min(100%, 1180px); margin-inline: auto; padding: 20px clamp(20px, 5vw, 58px) 0; }
 .ani-recap-progress { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; }
 .ani-recap-progress span { height: 4px; border-radius: 999px; background: rgba(148, 170, 220, .18); transition: background var(--ani-dur-2) var(--ani-ease), box-shadow var(--ani-dur-2) var(--ani-ease); }
@@ -799,14 +1037,14 @@ export const recapCss = `
 .ani-recap-chrome-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ani-recap-chrome-count { color: var(--rc-ink-3); font-size: 10px; font-weight: 800; letter-spacing: .14em; font-variant-numeric: tabular-nums; }
 .ani-recap-stale { width: fit-content; border: 1px solid rgba(252, 211, 77, .45); border-radius: 999px; background: rgba(252, 211, 77, .12); color: #fcd34d; font-size: 9px; font-weight: 800; padding: 4px 10px; }
-.ani-recap-chapter-content { align-self: stretch; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; align-content: safe center; gap: clamp(26px, 5vw, 72px); width: min(100%, 1180px); min-height: 0; margin-inline: auto; overflow-y: auto; overscroll-behavior: contain; padding: 30px clamp(22px, 6vw, 72px); }
+.ani-recap-chapter-content { align-self: stretch; display: grid; grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr); align-items: center; align-content: safe center; gap: clamp(26px, 4.5vw, 64px); width: min(100%, 1220px); min-height: 0; margin-inline: auto; overflow-y: auto; overscroll-behavior: contain; padding: 30px clamp(22px, 6vw, 72px); }
 .ani-recap-chapter-copy { min-width: 0; }
 .ani-recap-chapter-visual { min-width: 0; }
 .ani-recap-playback-actions { position: relative; z-index: 2; display: grid; grid-template-columns: max-content 1fr max-content; align-items: center; gap: 10px; width: min(100%, 1180px); margin-inline: auto; border-top: 1px solid var(--rc-line); padding: 16px clamp(20px, 5vw, 58px) max(22px, env(safe-area-inset-bottom)); }
 .ani-recap-evidence-button { justify-self: center; }
 .ani-recap-payload-stack { display: grid; gap: 16px; }
 .ani-recap-metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.ani-recap-metric { display: grid; gap: 4px; align-content: end; min-height: 128px; border: 1px solid var(--rc-line); border-radius: 18px; background: var(--rc-surface); padding: 18px 20px; }
+.ani-recap-metric { display: grid; gap: 4px; align-content: end; min-height: 148px; border: 1px solid var(--rc-line); border-radius: 18px; background: var(--rc-surface); padding: 20px 22px; }
 .ani-recap-metric-label { color: var(--rc-ink-3); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
 .ani-recap-metric-value { color: var(--rc-ink); font-size: clamp(30px, 3.4vw, 46px); font-weight: 900; line-height: 1; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
 .ani-recap-metric-unit { color: var(--rc-accent); font-size: 11px; font-weight: 800; }
@@ -824,33 +1062,42 @@ export const recapCss = `
 .ani-recap-meter { position: relative; display: block; overflow: hidden; width: 100%; height: 4px; margin-top: 8px; border-radius: 999px; background: rgba(148, 170, 220, .16); }
 .ani-recap-meter::after { content: ""; position: absolute; inset: 0; width: calc(var(--rc-level, 0) * 100%); border-radius: inherit; background: var(--rc-meter, var(--rc-accent)); box-shadow: 0 0 10px color-mix(in srgb, var(--rc-meter, var(--rc-accent)) 45%, transparent); }
 .ani-recap-meter--season::after { --rc-meter: var(--rc-season, var(--rc-accent)); }
-.ani-recap-stage[data-transition="forward"] .ani-recap-meter::after, .ani-recap-stage[data-transition="backward"] .ani-recap-meter::after { transform-origin: left center; animation: ani-recap-meter-grow 640ms var(--ani-ease-out) 340ms both; }
+.ani-recap-stage[data-transition="forward"] .ani-recap-meter::after, .ani-recap-stage[data-transition="backward"] .ani-recap-meter::after { transform-origin: left center; animation: ani-recap-meter-grow 640ms var(--ani-ease-out) both; animation-delay: calc(400ms + var(--rc-stagger, 0) * 55ms); }
+.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"]) .ani-recap-clock-bar { transform-origin: bottom; animation: ani-recap-meter-grow 480ms var(--ani-ease-out) both; animation-delay: calc(300ms + var(--rc-i, 0) * 14ms); }
 .ani-recap-big-metric { display: grid; align-content: center; min-height: 132px; border: 1px solid color-mix(in srgb, var(--rc-accent) 34%, transparent); border-radius: 20px; background: linear-gradient(140deg, color-mix(in srgb, var(--rc-accent) 15%, transparent), var(--rc-surface) 58%); padding: 22px 24px; }
-.ani-recap-big-metric strong { color: var(--rc-accent); font-size: clamp(32px, 3.8vw, 50px); font-weight: 900; letter-spacing: -.03em; line-height: 1.08; font-variant-numeric: tabular-nums; }
+.ani-recap-big-metric strong { color: var(--rc-accent); font-size: clamp(32px, 3.8vw, 50px); font-weight: 900; letter-spacing: -.03em; line-height: 1.08; font-variant-numeric: tabular-nums; text-wrap: balance; }
+.ani-recap-big-metric strong[data-long="true"] { font-size: clamp(24px, 2.8vw, 36px); }
 .ani-recap-big-metric span { margin-top: 8px; color: var(--rc-ink-3); font-size: 11px; font-weight: 700; }
 .ani-recap-story-ranking { display: grid; }
 .ani-recap-ranking-row { display: grid; grid-template-columns: 22px 46px minmax(0, 1fr) max-content; align-items: center; gap: 14px; border-bottom: 1px solid var(--rc-line); padding: 10px 0; }
 .ani-recap-ranking-rank { color: var(--rc-ink-3); font-size: 12px; font-weight: 900; text-align: center; font-variant-numeric: tabular-nums; }
-.ani-recap-ranking-cover { overflow: hidden; width: 46px; aspect-ratio: 3 / 4; border-radius: 8px; background: var(--rc-surface-strong); box-shadow: 0 8px 20px rgba(0, 0, 0, .35); }
+.ani-recap-ranking-cover { display: grid; place-items: center; overflow: hidden; width: 46px; aspect-ratio: 3 / 4; border-radius: 8px; background: var(--rc-surface-strong); box-shadow: 0 8px 20px rgba(0, 0, 0, .35); }
 .ani-recap-ranking-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ani-recap-intro .ani-cover-fallback, .ani-recap-stage .ani-cover-fallback { color: var(--rc-ink-3); font-size: 16px; font-weight: 900; user-select: none; }
+.ani-recap-leader-cover .ani-cover-fallback { font-size: 30px; }
 .ani-recap-ranking-copy { display: grid; gap: 2px; min-width: 0; }
 .ani-recap-ranking-copy .ani-recap-meter { margin-top: 6px; max-width: 210px; }
 .ani-recap-ranking-title { overflow: hidden; color: var(--rc-ink); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .ani-recap-ranking-meta { overflow: hidden; color: var(--rc-ink-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .ani-recap-ranking-value { color: var(--rc-ink-2); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
-.ani-recap-story-note { margin: 0; color: var(--rc-ink-3); font-size: 11px; line-height: 1.6; }
+.ani-recap-story-note { margin: 0; color: var(--rc-ink-3); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.ani-recap-clock { display: grid; gap: 6px; min-width: 0; }
+.ani-recap-clock-bars { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 4px; align-items: end; height: 128px; border-bottom: 1px solid var(--rc-line-strong); padding-top: 6px; }
+.ani-recap-clock-bar { display: block; height: max(3px, calc(var(--rc-level, 0) * 116px)); border-radius: 4px 4px 2px 2px; background: color-mix(in srgb, var(--rc-accent) 46%, rgba(148, 170, 220, .22)); }
+.ani-recap-clock-bar[data-peak="true"] { background: var(--rc-accent); box-shadow: 0 0 12px color-mix(in srgb, var(--rc-accent) 50%, transparent); }
+.ani-recap-clock-labels { display: flex; justify-content: space-between; color: var(--rc-ink-3); font-size: 9px; font-variant-numeric: tabular-nums; }
 .ani-recap-preference-leader { position: relative; isolation: isolate; display: grid; grid-template-columns: 104px minmax(0, 1fr); grid-template-rows: repeat(4, min-content); align-content: center; gap: 5px 18px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--rc-accent) 32%, transparent); border-radius: 20px; background: var(--rc-surface); padding: 18px; }
 .ani-recap-preference-leader::before { content: ""; position: absolute; z-index: -1; inset: 0; background: radial-gradient(120% 100% at 90% -25%, color-mix(in srgb, var(--rc-accent) 18%, transparent), transparent 60%); }
-.ani-recap-leader-cover { grid-row: 1 / -1; overflow: hidden; width: 104px; aspect-ratio: 3 / 4; border-radius: 14px; background: var(--rc-surface-strong); box-shadow: 0 16px 36px rgba(0, 0, 0, .45); }
+.ani-recap-leader-cover { display: grid; place-items: center; grid-row: 1 / -1; overflow: hidden; width: 104px; aspect-ratio: 3 / 4; border-radius: 14px; background: var(--rc-surface-strong); box-shadow: 0 16px 36px rgba(0, 0, 0, .45); }
 .ani-recap-leader-cover img { width: 100%; height: 100%; object-fit: cover; }
 .ani-recap-leader-label { align-self: end; color: var(--rc-accent); font-size: 10px; font-weight: 900; letter-spacing: .12em; }
-.ani-recap-leader-title { color: var(--rc-ink); font-size: 20px; font-weight: 800; line-height: 1.3; }
+.ani-recap-leader-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--rc-ink); font-size: 20px; font-weight: 800; line-height: 1.3; overflow-wrap: anywhere; }
 .ani-recap-leader-value { color: var(--rc-ink-2); font-size: 11px; }
 .ani-recap-taste-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; }
 .ani-recap-taste-column h4 { margin: 0 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--rc-line); color: var(--rc-accent); font-size: 11px; font-weight: 900; letter-spacing: .14em; }
 .ani-recap-taste-column ol { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
-.ani-recap-taste-column li { min-width: 0; }
-.ani-recap-taste-column li .ani-recap-meter { margin-top: 4px; height: 3px; }
+.ani-recap-taste-column li { display: grid; grid-template-rows: auto 7px; min-width: 0; }
+.ani-recap-taste-column li .ani-recap-meter { align-self: end; height: 3px; margin-top: 0; }
 .ani-recap-taste-line { display: flex; justify-content: space-between; gap: 10px; color: var(--rc-ink-2); font-size: 12px; }
 .ani-recap-taste-line span { overflow: hidden; color: var(--rc-ink); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .ani-recap-taste-line strong { color: var(--rc-ink-3); font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -862,7 +1109,7 @@ export const recapCss = `
 .ani-recap-evidence-close:hover { background: rgba(148, 173, 229, .14); }
 .ani-recap-evidence-chapter { margin: 5px 0 18px; color: var(--rc-ink-3); font-size: 11px; }
 .ani-recap-evidence-list { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 0; margin: 0; }
-.ani-recap-evidence-list dt, .ani-recap-evidence-list dd { border-bottom: 1px solid var(--rc-line); margin: 0; padding: 10px 0; font-size: 11px; }
+.ani-recap-evidence-list dt, .ani-recap-evidence-list dd { border-bottom: 1px solid var(--rc-line); margin: 0; padding: 10px 0; font-size: 11px; overflow-wrap: anywhere; }
 .ani-recap-evidence-list dt { color: var(--rc-ink-3); }
 .ani-recap-evidence-list dd { color: var(--rc-ink); font-weight: 850; text-align: right; font-variant-numeric: tabular-nums; }
 .ani-recap-outro { place-items: center; grid-template-rows: 1fr; }
@@ -870,15 +1117,22 @@ export const recapCss = `
 .ani-recap-outro-content .ani-recap-eyebrow::before { display: none; }
 .ani-recap-outro-content .ani-recap-narrative { margin-inline: auto; }
 .ani-recap-outro-summary { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 32px; }
+.ani-recap-marathon-facts { width: 100%; margin-top: 0; }
+.ani-recap-marathon-facts > .ani-recap-outro-fact { flex: 1 1 0; }
 .ani-recap-outro-fact { display: grid; gap: 3px; min-width: 130px; border: 1px solid var(--rc-line); border-radius: 16px; background: var(--rc-surface); padding: 16px 20px; }
 .ani-recap-outro-fact strong { color: var(--rc-ink); font-size: 22px; font-weight: 900; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .ani-recap-outro-fact span { color: var(--rc-ink-3); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
 .ani-recap-outro-actions { justify-content: center; }
 .ani-recap-invalid { display: grid; place-items: center; align-content: center; gap: 8px; min-height: 60vh; background: #060a14; color: #f4f7ff; padding: 30px; text-align: center; }
 .ani-recap-invalid h3, .ani-recap-invalid p { margin: 0; }
-@keyframes ani-recap-enter-forward { from { opacity: 0; transform: translateY(26px) scale(.992); filter: blur(8px); } to { opacity: 1; transform: none; filter: blur(0); } }
-@keyframes ani-recap-enter-backward { from { opacity: 0; transform: translateY(-20px) scale(.992); filter: blur(8px); } to { opacity: 1; transform: none; filter: blur(0); } }
+/* 進場只動 transform（compositor-only）：淡入交給內容 stagger，溶出交給 ghost。 */
+@keyframes ani-recap-enter-forward { from { transform: translateY(22px); } to { transform: none; } }
+@keyframes ani-recap-enter-backward { from { transform: translateY(-18px); } to { transform: none; } }
+@keyframes ani-recap-ghost-forward { to { opacity: 0; transform: translateY(-30px) scale(.988); } }
+@keyframes ani-recap-ghost-backward { to { opacity: 0; transform: translateY(26px) scale(.988); } }
 @keyframes ani-recap-content-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes ani-recap-content-fall { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: none; } }
+@keyframes ani-recap-poster-pop { from { opacity: 0; scale: .9; } to { opacity: var(--rc-poster-opacity, 1); scale: 1; } }
 @keyframes ani-recap-meter-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 @keyframes ani-recap-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ani-recap-aurora { from { transform: translate3d(-2%, -1%, 0) scale(1); } to { transform: translate3d(2.5%, 3%, 0) scale(1.07); } }
