@@ -11,12 +11,11 @@ export type RecapDeck<TChapter extends RecapChapter = RecapChapter> = {
   readonly chapters: readonly TChapter[];
 };
 
-export type RecapTransition =
-  | { readonly phase: "idle" }
-  | {
-      readonly phase: "running";
-      readonly direction: "forward" | "backward";
-    };
+/**
+ * 抵達目前畫面的方向：只決定換場往哪裡推，不再是「動畫進行中」的閘門。
+ * 換場隨時可被下一個操作打斷並重新導向，狀態機因此不需要等待動畫結束。
+ */
+export type RecapDirection = "forward" | "backward";
 
 export type ClosedRecapUiState = {
   readonly kind: "closed";
@@ -35,7 +34,7 @@ export type RecapChapterUiState<TDeck extends RecapDeck = RecapDeck> = {
   readonly deck: TDeck;
   readonly chapterId: string;
   readonly stale: boolean;
-  readonly transition: RecapTransition;
+  readonly direction: RecapDirection;
 };
 
 export type RecapEvidenceUiState<TDeck extends RecapDeck = RecapDeck> = {
@@ -45,11 +44,11 @@ export type RecapEvidenceUiState<TDeck extends RecapDeck = RecapDeck> = {
   readonly stale: boolean;
 };
 
-export type RecapOutroUiState<TDeck extends RecapDeck = RecapDeck> = {
-  readonly kind: "recap-outro";
+export type RecapSummaryUiState<TDeck extends RecapDeck = RecapDeck> = {
+  readonly kind: "recap-summary";
   readonly deck: TDeck;
   readonly stale: boolean;
-  readonly transition: RecapTransition;
+  readonly direction: RecapDirection;
 };
 
 export type RecapUiState<TDeck extends RecapDeck = RecapDeck> =
@@ -58,7 +57,7 @@ export type RecapUiState<TDeck extends RecapDeck = RecapDeck> =
   | RecapIntroUiState
   | RecapChapterUiState<TDeck>
   | RecapEvidenceUiState<TDeck>
-  | RecapOutroUiState<TDeck>;
+  | RecapSummaryUiState<TDeck>;
 
 export type RecapUiEvent<TDeck extends RecapDeck = RecapDeck> =
   | { readonly type: "OPEN"; readonly surface?: RecapSurface }
@@ -67,15 +66,14 @@ export type RecapUiEvent<TDeck extends RecapDeck = RecapDeck> =
   | { readonly type: "START_RECAP"; readonly deck: TDeck }
   | { readonly type: "NEXT" }
   | { readonly type: "PREVIOUS" }
+  | { readonly type: "GOTO_CHAPTER"; readonly chapterId: string }
   | { readonly type: "OPEN_EVIDENCE" }
   | { readonly type: "CLOSE_EVIDENCE" }
-  | { readonly type: "RESTART" }
-  | { readonly type: "DATA_UPDATED"; readonly fingerprint: string }
-  | { readonly type: "ANIMATION_FINISHED" };
+  /** With `deck` (built from the latest data for the same period), the replay shows it and is no longer stale. */
+  | { readonly type: "RESTART"; readonly deck?: TDeck }
+  | { readonly type: "DATA_UPDATED"; readonly fingerprint: string };
 
 export const initialRecapUiState: ClosedRecapUiState = Object.freeze({ kind: "closed" });
-
-const idleTransition: RecapTransition = Object.freeze({ phase: "idle" });
 
 /**
  * Applies one UI event. Events that are not legal in the current state are a
@@ -110,7 +108,7 @@ export const reduceRecapUiState = <TDeck extends RecapDeck = RecapDeck>(
         deck,
         chapterId: firstChapter.id,
         stale: false,
-        transition: runningTransition("forward")
+        direction: "forward"
       };
     }
 
@@ -120,8 +118,11 @@ export const reduceRecapUiState = <TDeck extends RecapDeck = RecapDeck>(
     case "PREVIOUS":
       return movePrevious(state);
 
+    case "GOTO_CHAPTER":
+      return gotoChapter(state, event.chapterId);
+
     case "OPEN_EVIDENCE":
-      if (state.kind !== "recap-chapter" || state.transition.phase !== "idle") return state;
+      if (state.kind !== "recap-chapter") return state;
       return {
         kind: "recap-evidence",
         deck: state.deck,
@@ -136,23 +137,14 @@ export const reduceRecapUiState = <TDeck extends RecapDeck = RecapDeck>(
         deck: state.deck,
         chapterId: state.chapterId,
         stale: state.stale,
-        transition: idleTransition
+        direction: "forward"
       };
 
     case "RESTART":
-      return restart(state);
+      return restart(state, event.deck);
 
     case "DATA_UPDATED":
       return markDeckStale(state, event.fingerprint);
-
-    case "ANIMATION_FINISHED":
-      if (state.kind === "recap-chapter" && state.transition.phase === "running") {
-        return { ...state, transition: idleTransition };
-      }
-      if (state.kind === "recap-outro" && state.transition.phase === "running") {
-        return { ...state, transition: idleTransition };
-      }
-      return state;
 
     default:
       return assertNever(event);
@@ -160,28 +152,23 @@ export const reduceRecapUiState = <TDeck extends RecapDeck = RecapDeck>(
 };
 
 const moveNext = <TDeck extends RecapDeck>(state: RecapUiState<TDeck>): RecapUiState<TDeck> => {
-  if (state.kind !== "recap-chapter" || state.transition.phase !== "idle") return state;
+  if (state.kind !== "recap-chapter") return state;
   const currentIndex = chapterIndex(state.deck, state.chapterId);
   if (currentIndex < 0) return state;
   const nextChapter = state.deck.chapters[currentIndex + 1];
   if (!nextChapter) {
     return {
-      kind: "recap-outro",
+      kind: "recap-summary",
       deck: state.deck,
       stale: state.stale,
-      transition: runningTransition("forward")
+      direction: "forward"
     };
   }
-  return {
-    ...state,
-    chapterId: nextChapter.id,
-    transition: runningTransition("forward")
-  };
+  return { ...state, chapterId: nextChapter.id, direction: "forward" };
 };
 
 const movePrevious = <TDeck extends RecapDeck>(state: RecapUiState<TDeck>): RecapUiState<TDeck> => {
-  if (state.kind === "recap-outro") {
-    if (state.transition.phase !== "idle") return state;
+  if (state.kind === "recap-summary") {
     const lastChapter = state.deck.chapters.at(-1);
     if (!lastChapter) return state;
     return {
@@ -189,38 +176,71 @@ const movePrevious = <TDeck extends RecapDeck>(state: RecapUiState<TDeck>): Reca
       deck: state.deck,
       chapterId: lastChapter.id,
       stale: state.stale,
-      transition: runningTransition("backward")
+      direction: "backward"
     };
   }
-  if (state.kind !== "recap-chapter" || state.transition.phase !== "idle") return state;
+  if (state.kind !== "recap-chapter") return state;
   const currentIndex = chapterIndex(state.deck, state.chapterId);
   if (currentIndex < 0) return state;
   if (currentIndex === 0) return { kind: "recap-intro" };
   const previousChapter = state.deck.chapters[currentIndex - 1];
   if (!previousChapter) return state;
-  return {
-    ...state,
-    chapterId: previousChapter.id,
-    transition: runningTransition("backward")
-  };
+  return { ...state, chapterId: previousChapter.id, direction: "backward" };
 };
 
-const restart = <TDeck extends RecapDeck>(state: RecapUiState<TDeck>): RecapUiState<TDeck> => {
-  if (
-    state.kind !== "recap-chapter"
-    && state.kind !== "recap-evidence"
-    && state.kind !== "recap-outro"
-  ) {
-    return state;
+/** 從進度條或總結磚跳回任一章；方向依章節先後決定，維持同一條空間軸。 */
+const gotoChapter = <TDeck extends RecapDeck>(
+  state: RecapUiState<TDeck>,
+  chapterId: string
+): RecapUiState<TDeck> => {
+  if (state.kind !== "recap-chapter" && state.kind !== "recap-summary") return state;
+  const targetIndex = chapterIndex(state.deck, chapterId);
+  if (targetIndex < 0) return state;
+  if (state.kind === "recap-chapter") {
+    const currentIndex = chapterIndex(state.deck, state.chapterId);
+    if (currentIndex === targetIndex) return state;
+    return {
+      ...state,
+      chapterId,
+      direction: targetIndex > currentIndex ? "forward" : "backward"
+    };
   }
-  const firstChapter = state.deck.chapters[0];
-  if (!firstChapter) return state;
   return {
     kind: "recap-chapter",
     deck: state.deck,
-    chapterId: firstChapter.id,
+    chapterId,
     stale: state.stale,
-    transition: runningTransition("forward")
+    direction: "backward"
+  };
+};
+
+/**
+ * 從第一章重播。帶著同一期間的最新 deck 時改播它並清掉 stale，結尾「從頭播放即可查看最新回顧」
+ * 才是真的；沒有（或期間不同、deck 無效）就重播凍結的那一份。
+ */
+const restart = <TDeck extends RecapDeck>(
+  state: RecapUiState<TDeck>,
+  latest: TDeck | undefined
+): RecapUiState<TDeck> => {
+  if (
+    state.kind !== "recap-chapter"
+    && state.kind !== "recap-evidence"
+    && state.kind !== "recap-summary"
+  ) {
+    return state;
+  }
+  const fresh = latest && latest.scopeKey === state.deck.scopeKey && isValidDeck(latest)
+    ? snapshotDeck(latest)
+    : undefined;
+  const deck = fresh ?? state.deck;
+  const firstChapter = deck.chapters[0];
+  if (!firstChapter) return state;
+  return {
+    kind: "recap-chapter",
+    deck,
+    chapterId: firstChapter.id,
+    stale: fresh ? false : state.stale,
+    direction: "forward"
   };
 };
 
@@ -231,7 +251,7 @@ const markDeckStale = <TDeck extends RecapDeck>(
   if (
     state.kind !== "recap-chapter"
     && state.kind !== "recap-evidence"
-    && state.kind !== "recap-outro"
+    && state.kind !== "recap-summary"
   ) {
     return state;
   }
@@ -241,9 +261,6 @@ const markDeckStale = <TDeck extends RecapDeck>(
 
 const chapterIndex = (deck: RecapDeck, chapterId: string): number =>
   deck.chapters.findIndex((chapter) => chapter.id === chapterId);
-
-const runningTransition = (direction: "forward" | "backward"): RecapTransition =>
-  Object.freeze({ phase: "running", direction });
 
 const isValidDeck = (deck: RecapDeck): boolean => {
   if (

@@ -35,6 +35,13 @@ export type CollectEpisodeMetadataOptions = {
   readonly signal?: AbortSignal;
   readonly concurrency?: number;
   readonly onProgress?: (state: MetadataState) => void;
+  /**
+   * Minimum spacing between progress snapshots. Each snapshot deep-copies the
+   * collected records, so emitting on every completion grows quadratically.
+   * Phase changes, including the final state, are always delivered at once and
+   * a trailing snapshot follows a suppressed change. Defaults to 0 (every change).
+   */
+  readonly progressIntervalMilliseconds?: number;
 };
 
 type CompletionKind = "available" | "unavailable" | "failed";
@@ -91,6 +98,10 @@ export const collectEpisodeMetadata = async (
   if (typeof options.resolver !== "function") {
     throw new Error("metadata resolver 必須是 function");
   }
+  const progressInterval = options.progressIntervalMilliseconds ?? 0;
+  if (!Number.isFinite(progressInterval) || progressInterval < 0) {
+    throw new Error("progressIntervalMilliseconds 必須是有限非負數");
+  }
 
   const watchedVideoSns = [...new Set(entries.map((entry) => {
     assertPositiveSafeInteger(entry.videoSn, "WatchEntry.videoSn");
@@ -132,7 +143,28 @@ export const collectEpisodeMetadata = async (
     issues: issues.map((issue) => ({ ...issue })),
     progress: { ...progress }
   });
-  const emit = (): void => options.onProgress?.(snapshot());
+  let lastEmitAt = Number.NEGATIVE_INFINITY;
+  let lastEmittedPhase: MetadataProgress["phase"] | undefined;
+  let trailingEmit: ReturnType<typeof setTimeout> | undefined;
+  const cancelTrailingEmit = (): void => {
+    if (trailingEmit !== undefined) clearTimeout(trailingEmit);
+    trailingEmit = undefined;
+  };
+  const emitNow = (): void => {
+    cancelTrailingEmit();
+    lastEmitAt = performance.now();
+    lastEmittedPhase = progress.phase;
+    options.onProgress?.(snapshot());
+  };
+  const emit = (): void => {
+    if (!options.onProgress) return;
+    const elapsed = performance.now() - lastEmitAt;
+    if (progress.phase !== lastEmittedPhase || elapsed >= progressInterval) {
+      emitNow();
+    } else {
+      trailingEmit ??= setTimeout(emitNow, progressInterval - elapsed);
+    }
+  };
   const completeOne = (videoSn: number, kind: CompletionKind): void => {
     if (terminalKinds.has(videoSn)) {
       throw new Error(`videoSn ${videoSn} 不可重複完成`);
@@ -409,11 +441,38 @@ export const collectEpisodeMetadata = async (
     pump();
   });
   if (!options.signal?.aborted && progress.completed !== progress.total) {
+    cancelTrailingEmit();
     throw new Error("metadata collector 在所有 catalog 項目 terminal 前不可完成");
   }
   progress = { ...progress, phase: options.signal?.aborted ? "aborted" : "complete" };
   emit();
   return snapshot();
+};
+
+/**
+ * The records shown while a re-collection runs. Every videoSn the new
+ * collection has already settled (as a record or an issue) comes from `next`;
+ * the previous records fill in the rest. The view therefore neither empties
+ * nor freezes on an earlier, possibly half-finished, collection.
+ */
+export const overlayMetadataState = (previous: MetadataState, next: MetadataState): MetadataState => {
+  const settled = new Set<number>([
+    ...next.episodes.keys(),
+    ...next.issues.map((issue) => issue.videoSn)
+  ]);
+  const episodes = new Map<number, EpisodeMetadata>();
+  for (const [videoSn, episode] of previous.episodes) {
+    if (!settled.has(videoSn)) episodes.set(videoSn, episode);
+  }
+  for (const [videoSn, episode] of next.episodes) episodes.set(videoSn, episode);
+  const anime = new Map(previous.anime);
+  for (const [animeSn, metadata] of next.anime) anime.set(animeSn, metadata);
+  return {
+    episodes,
+    anime,
+    issues: [...previous.issues.filter((issue) => !settled.has(issue.videoSn)), ...next.issues],
+    progress: next.progress
+  };
 };
 
 const issueFromResolutionError = (videoSn: number, error: unknown): MetadataIssue => {

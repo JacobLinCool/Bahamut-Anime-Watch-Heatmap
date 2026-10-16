@@ -14,8 +14,17 @@ export type EpisodeMetadata = {
   /** Exact key of the containing anime.episodes group returned by the API. */
   readonly groupKey: string;
   readonly episodeIndex: number;
+  /**
+   * The API's episode label: a finite number ≥ 0, where 0 is a prologue and a
+   * fraction such as 9.5 is a special. Structural results (completion, playback
+   * group timelines, preferences) use only positive integers and exclude the rest.
+   */
   readonly episodeNumber: number;
   readonly availableFrom: Date;
+  /**
+   * End of official availability. A date-only API value is stored as the
+   * Asia/Taipei start of that day (or availableFrom on the release day), a lower bound.
+   */
   readonly availableUntil: Date | null;
   readonly durationMinutes: number;
   readonly coverUrl: string | null;
@@ -25,6 +34,7 @@ export type EpisodeMetadata = {
 
 export type EpisodeRef = {
   readonly videoSn: number;
+  /** Same domain as EpisodeMetadata.episodeNumber. */
   readonly episodeNumber: number;
   readonly groupKey: string;
   readonly coverUrl: string | null;

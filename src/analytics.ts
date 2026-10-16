@@ -221,6 +221,11 @@ export type AnalyticsResult = {
   readonly historyComplete: boolean;
   readonly summary: WatchSummary;
   readonly rhythm: readonly RhythmPoint[];
+  /**
+   * 季度期間另外提供七天一格的節奏（label 為該週第一天）：月份只有三格、日又太多。
+   * 其他期間不提供；儀表板仍使用 rhythm。
+   */
+  readonly weeklyRhythm?: readonly RhythmPoint[];
   readonly seasonBreakdown: readonly SeasonBreakdownRow[];
   readonly runtime: {
     readonly available: boolean;
@@ -391,6 +396,7 @@ export const analyzeWatchHistory = ({
       scheduleBoundaryIssueCount: dataset.selectedCanonical.filter(scheduleBoundaryMismatch).length
     },
     rhythm: buildRhythm(dataset),
+    ...(dataset.scope.period.kind === "calendar-season" ? { weeklyRhythm: buildWeeklyRhythm(dataset) } : {}),
     seasonBreakdown: buildSeasonBreakdown(dataset, historyComplete),
     runtime,
     catalog,
@@ -1340,6 +1346,38 @@ const buildRhythm = (dataset: AnalysisDataset): readonly RhythmPoint[] => {
       contentMinutes: value.knownDurations > 0 || value.count === 0 ? value.knownMinutes : null
     };
   });
+};
+
+/** 從期間第一天起每七天一格；最後不足一週的零頭併入前一格，不畫出一根誤導的短柱。 */
+const buildWeeklyRhythm = (dataset: AnalysisDataset): readonly RhythmPoint[] => {
+  const mode = dataset.scope.axis === "watched-at" ? dataset.scope.dayBoundaryMode : "calendar";
+  const start = toTaipeiDateKey(dataset.period.effectiveRange.startInclusive, mode);
+  const end = toTaipeiDateKey(new Date(dataset.period.effectiveRange.endExclusive.getTime() - 1), mode);
+  const dayIndex = new Map<string, number>();
+  let days = 0;
+  for (let key = start; key <= end; key = addTaipeiCalendarDays(key, 1)) dayIndex.set(key, days++);
+  const binCount = Math.max(1, Math.floor(days / 7));
+  const bins = Array.from({ length: binCount }, (_, index) => ({
+    label: addTaipeiCalendarDays(start, index * 7),
+    count: 0,
+    knownMinutes: 0,
+    knownDurations: 0
+  }));
+  for (const fact of dataset.selectedEvents) {
+    const index = dayIndex.get(axisDateKey(fact, dataset.scope));
+    if (index === undefined) continue;
+    const bin = bins[Math.min(binCount - 1, Math.floor(index / 7))]!;
+    bin.count += 1;
+    if (validDuration(fact.episode)) {
+      bin.knownMinutes += fact.episode.durationMinutes;
+      bin.knownDurations += 1;
+    }
+  }
+  return bins.map((bin) => ({
+    label: bin.label,
+    count: bin.count,
+    contentMinutes: bin.knownDurations > 0 || bin.count === 0 ? bin.knownMinutes : null
+  }));
 };
 
 const axisDateKey = (fact: WatchFact, scope: AnalysisScope): string => {

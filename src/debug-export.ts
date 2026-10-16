@@ -1,13 +1,23 @@
 import type { HistoryCoverage } from "./analytics";
 import {
+  HISTORY_CACHE_RETENTION_DAYS,
+  HISTORY_FULL_SYNC_INTERVAL_MILLISECONDS,
+  type HistoryLoadDiagnostics
+} from "./history-cache";
+import {
+  INVALID_RESPONSE_CACHE_TTL_MILLISECONDS,
   isMetadataV1CacheKey,
   serializeAnimeMetadata,
   serializeEpisodeMetadata,
-  UNAVAILABLE_CACHE_TTL_MILLISECONDS,
+  UNAVAILABLE_CACHE_BACKOFF_FACTOR,
+  UNAVAILABLE_CACHE_BASE_TTL_MILLISECONDS,
+  UNAVAILABLE_CACHE_JITTER_RATIO,
+  UNAVAILABLE_CACHE_MAX_TTL_MILLISECONDS,
   type StoredAnimeMetadata,
   type StoredEpisodeMetadata
 } from "./metadata-cache";
 import { MAX_METADATA_REQUESTS_PER_SECOND } from "./metadata-coordinator";
+import { METADATA_PARSER_VERSION } from "./metadata-schema";
 import type { HistoryParseIssue } from "./history";
 import type {
   DayBoundaryMode,
@@ -18,10 +28,13 @@ import type {
 } from "./model";
 
 export const DEBUG_EXPORT_FORMAT = "ani-gamer-heatmap-debug";
-export const DEBUG_EXPORT_FORMAT_VERSION = 1;
+export const DEBUG_EXPORT_FORMAT_VERSION = 2;
 
 export const CACHE_EPOCH_SESSION_KEY = "ani-gamer-heatmap:metadata-cache-epoch:v1";
 export const REQUEST_STARTS_SESSION_KEY = "ani-gamer-heatmap:metadata-request-starts:v1";
+/** Recent network request starts (epoch ms), kept only for diagnostics. */
+export const REQUEST_LOG_SESSION_KEY = "ani-gamer-heatmap:metadata-request-log:v1";
+export const MAX_REQUEST_LOG_ENTRIES = 2_000;
 
 type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
@@ -38,6 +51,20 @@ export type MetadataDebugSnapshotWire = {
   readonly coordination: {
     readonly cacheEpoch: JsonValue;
     readonly requestStarts: JsonValue;
+    readonly requestLog: JsonValue;
+  };
+};
+
+/** Network request starts that fell inside one metadata collection, across all tabs. */
+export type MetadataCollectionDiagnostics = {
+  readonly startedAt: string | null;
+  readonly finishedAt: string | null;
+  readonly networkRequests: {
+    readonly scope: "extension-wide";
+    readonly count: number | null;
+    readonly firstStartedAt: string | null;
+    readonly lastStartedAt: string | null;
+    readonly spanMilliseconds: number | null;
   };
 };
 
@@ -68,12 +95,23 @@ export type AniGamerDebugExport = {
         readonly complete: boolean;
       };
       readonly parseIssues: readonly HistoryParseIssue[];
+      readonly load: HistoryLoadDiagnostics;
+      readonly policy: {
+        readonly cacheRetentionDays: number;
+        readonly fullSyncIntervalMilliseconds: number;
+      };
     };
     readonly metadata: {
       readonly progress: MetadataProgress;
       readonly issues: readonly MetadataIssue[];
+      readonly collection: MetadataCollectionDiagnostics;
       readonly policy: {
-        readonly unavailableCacheTtlMilliseconds: number;
+        readonly parserVersion: number;
+        readonly unavailableCacheBaseTtlMilliseconds: number;
+        readonly unavailableCacheBackoffFactor: number;
+        readonly unavailableCacheMaxTtlMilliseconds: number;
+        readonly unavailableCacheJitterRatio: number;
+        readonly invalidResponseCacheTtlMilliseconds: number;
         readonly maxRequestStartsPerRollingSecond: number;
       };
       readonly cacheCapturedAt: string;
@@ -109,9 +147,41 @@ export const createMetadataDebugSnapshot = (
     cacheEntries,
     coordination: {
       cacheEpoch: optionalStorageValue(input.sessionValues, CACHE_EPOCH_SESSION_KEY),
-      requestStarts: optionalStorageValue(input.sessionValues, REQUEST_STARTS_SESSION_KEY)
+      requestStarts: optionalStorageValue(input.sessionValues, REQUEST_STARTS_SESSION_KEY),
+      requestLog: optionalStorageValue(input.sessionValues, REQUEST_LOG_SESSION_KEY)
     }
   };
+};
+
+export const parseRequestLog = (value: unknown): number[] => {
+  if (!Array.isArray(value) || value.length > MAX_REQUEST_LOG_ENTRIES) {
+    throw new Error(`metadata request log 必須是最多 ${MAX_REQUEST_LOG_ENTRIES} 筆的 array`);
+  }
+  return value.map((timestamp, index) => {
+    if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp < 0) {
+      throw new Error("metadata request log timestamp 必須是有限非負數");
+    }
+    const previous = value[index - 1] as number | undefined;
+    if (previous !== undefined && timestamp < previous) {
+      throw new Error("metadata request log 必須是非遞減排序");
+    }
+    return timestamp;
+  });
+};
+
+/** Appends one start; an absent or malformed log restarts, since it is diagnostics only. */
+export const appendRequestLog = (value: unknown, timestamp: number): number[] => {
+  if (!Number.isFinite(timestamp) || timestamp < 0) {
+    throw new Error("metadata request log timestamp 必須是有限非負數");
+  }
+  let log: number[];
+  try {
+    log = value === undefined ? [] : parseRequestLog(value);
+  } catch {
+    log = [];
+  }
+  const next = [...log, Math.max(timestamp, log.at(-1) ?? 0)];
+  return next.slice(Math.max(0, next.length - MAX_REQUEST_LOG_ENTRIES));
 };
 
 export const parseMetadataDebugSnapshotWire = (value: unknown): MetadataDebugSnapshotWire => {
@@ -148,7 +218,7 @@ export const parseMetadataDebugSnapshotWire = (value: unknown): MetadataDebugSna
 
   const coordination = requireExactRecord(
     snapshot.coordination,
-    ["cacheEpoch", "requestStarts"],
+    ["cacheEpoch", "requestLog", "requestStarts"],
     "metadata debug snapshot.coordination"
   );
   return {
@@ -160,7 +230,8 @@ export const parseMetadataDebugSnapshotWire = (value: unknown): MetadataDebugSna
       requestStarts: requireJsonValue(
         coordination.requestStarts,
         "metadata debug coordination.requestStarts"
-      )
+      ),
+      requestLog: requireJsonValue(coordination.requestLog, "metadata debug coordination.requestLog")
     }
   };
 };
@@ -177,6 +248,9 @@ export type BuildDebugExportInput = {
   readonly loadedCompleteHistory: boolean;
   readonly historyCoverage: HistoryCoverage;
   readonly historyParseIssues: readonly HistoryParseIssue[];
+  readonly historyLoad: HistoryLoadDiagnostics;
+  readonly metadataCollectionStartedAt?: Date;
+  readonly metadataCollectionFinishedAt?: Date;
 };
 
 export const buildDebugExport = (input: BuildDebugExportInput): AniGamerDebugExport => {
@@ -225,19 +299,65 @@ export const buildDebugExport = (input: BuildDebugExportInput): AniGamerDebugExp
           ),
           complete: input.historyCoverage.complete
         },
-        parseIssues: input.historyParseIssues.map((issue) => ({ ...issue }))
+        parseIssues: input.historyParseIssues.map((issue) => ({ ...issue })),
+        load: { ...input.historyLoad, rowsPerPage: [...input.historyLoad.rowsPerPage] },
+        policy: {
+          cacheRetentionDays: HISTORY_CACHE_RETENTION_DAYS,
+          fullSyncIntervalMilliseconds: HISTORY_FULL_SYNC_INTERVAL_MILLISECONDS
+        }
       },
       metadata: {
         progress: { ...input.metadataState.progress },
         issues: input.metadataState.issues.map((issue) => ({ ...issue })),
+        collection: metadataCollectionDiagnostics(
+          cacheSnapshot.coordination.requestLog,
+          input.metadataCollectionStartedAt,
+          input.metadataCollectionFinishedAt ?? new Date(cacheSnapshot.capturedAt)
+        ),
         policy: {
-          unavailableCacheTtlMilliseconds: UNAVAILABLE_CACHE_TTL_MILLISECONDS,
+          parserVersion: METADATA_PARSER_VERSION,
+          unavailableCacheBaseTtlMilliseconds: UNAVAILABLE_CACHE_BASE_TTL_MILLISECONDS,
+          unavailableCacheBackoffFactor: UNAVAILABLE_CACHE_BACKOFF_FACTOR,
+          unavailableCacheMaxTtlMilliseconds: UNAVAILABLE_CACHE_MAX_TTL_MILLISECONDS,
+          unavailableCacheJitterRatio: UNAVAILABLE_CACHE_JITTER_RATIO,
+          invalidResponseCacheTtlMilliseconds: INVALID_RESPONSE_CACHE_TTL_MILLISECONDS,
           maxRequestStartsPerRollingSecond: MAX_METADATA_REQUESTS_PER_SECOND
         },
         cacheCapturedAt: cacheSnapshot.capturedAt,
         cacheEntries: cacheSnapshot.cacheEntries.map((entry) => ({ ...entry })),
         coordination: { ...cacheSnapshot.coordination }
       }
+    }
+  };
+};
+
+const metadataCollectionDiagnostics = (
+  requestLog: JsonValue,
+  startedAt: Date | undefined,
+  finishedAt: Date
+): MetadataCollectionDiagnostics => {
+  const started = startedAt ? canonicalIso(startedAt, "metadataCollectionStartedAt") : null;
+  const finished = startedAt ? canonicalIso(finishedAt, "metadataCollectionFinishedAt") : null;
+  let starts: number[] | null = null;
+  if (startedAt) {
+    try {
+      starts = (requestLog === null ? [] : parseRequestLog(requestLog)).filter((timestamp) =>
+        timestamp >= startedAt.getTime() && timestamp <= finishedAt.getTime());
+    } catch {
+      starts = null;
+    }
+  }
+  const first = starts?.[0];
+  const last = starts?.at(-1);
+  return {
+    startedAt: started,
+    finishedAt: finished,
+    networkRequests: {
+      scope: "extension-wide",
+      count: starts?.length ?? null,
+      firstStartedAt: first === undefined ? null : new Date(first).toISOString(),
+      lastStartedAt: last === undefined ? null : new Date(last).toISOString(),
+      spanMilliseconds: first === undefined || last === undefined ? null : last - first
     }
   };
 };

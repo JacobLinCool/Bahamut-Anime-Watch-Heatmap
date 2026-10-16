@@ -12,11 +12,15 @@ import { MetadataProgressEstimator } from "./metadata-progress";
 import type { DayBoundaryMode, MetadataState, WatchEntry } from "./model";
 import {
   analysisScopeKey,
+  createAnalysisScope,
   getAnalysisScopeOptionGroups,
+  resolvePeriod,
   type AnalysisAxis,
   type AnalysisScope,
   type AnalysisScopeOptionGroup,
-  type PeriodDefinition
+  type AnalysisScopeOptionGroupId,
+  type PeriodDefinition,
+  type ResolvedPeriod
 } from "./period";
 import { buildRecapDeck, type RecapPresentationDeck } from "./recap/recap-deck";
 import {
@@ -25,11 +29,11 @@ import {
   type RecapUiEvent,
   type RecapUiState
 } from "./recap/recap-state";
+import { RecapTheater, type RecapLayoutSnapshot } from "./recap/recap-theater";
 import {
-  createRecapGhost,
+  recapAnnouncement,
   recapCss,
-  RECAP_EVIDENCE_OPENER_FOCUS_KEY,
-  renderRecapSurface
+  RECAP_EVIDENCE_OPENER_FOCUS_KEY
 } from "./recap/recap-view";
 import { createButton, element, textElement } from "./view-dom";
 
@@ -47,6 +51,8 @@ export type AnalysisViewState = {
   readonly dayBoundaryMode: DayBoundaryMode;
   readonly historyStatus: "loading" | "ready" | "error";
   readonly historyError?: string;
+  /** Short status of the shown history, e.g. a saved snapshot that is still refreshing. */
+  readonly historyNote?: string;
 };
 
 type AnalysisViewOptions = {
@@ -67,6 +73,7 @@ export class AnalysisView {
   #overlay: HTMLElement | undefined;
   #shell: HTMLElement | undefined;
   #heading: HTMLElement | undefined;
+  #header: HTMLElement | undefined;
   #metadataProgress: HTMLElement | undefined;
   #metadataProgressDetail: HTMLElement | undefined;
   #metadataProgressBar: HTMLProgressElement | undefined;
@@ -75,6 +82,7 @@ export class AnalysisView {
   #axisControl: HTMLElement | undefined;
   #select: HTMLSelectElement | undefined;
   #periodDescription: HTMLElement | undefined;
+  #historyNote: HTMLElement | undefined;
   #main: HTMLElement | undefined;
   #live: HTMLElement | undefined;
   #cacheButton: HTMLButtonElement | undefined;
@@ -86,6 +94,9 @@ export class AnalysisView {
   #isClosing = false;
   #pendingReveal = false;
   #renderedSurface: "dashboard" | "recap" | undefined;
+  #theater: RecapTheater | undefined;
+  #headerObserver: ResizeObserver | undefined;
+  #latestResult: AnalyticsResult | undefined;
   #countUpFrames: number[] = [];
   #isClearingMetadataCache = false;
   #isDownloadingDebugData = false;
@@ -115,6 +126,7 @@ export class AnalysisView {
     this.#syncScopeOptions();
     this.#syncCacheButton();
     this.#syncMetadataProgress();
+    this.#syncHistoryNote();
     this.#render();
   }
 
@@ -240,6 +252,10 @@ export class AnalysisView {
     periodField.append(periodLabel, select);
 
     const periodDescription = element("div", "ani-analysis-period-description");
+    const periodDescriptionText = element("span");
+    const historyNote = element("span", "ani-analysis-history-note");
+    historyNote.hidden = true;
+    periodDescription.append(periodDescriptionText, historyNote);
     controlsInner.append(axisControl, periodField, periodDescription);
     controls.append(controlsInner);
 
@@ -257,6 +273,7 @@ export class AnalysisView {
     this.#overlay = overlay;
     this.#shell = shell;
     this.#heading = heading;
+    this.#header = header;
     this.#metadataProgress = metadataProgress;
     this.#metadataProgressDetail = metadataProgressDetail;
     this.#metadataProgressBar = metadataProgressBar;
@@ -264,7 +281,8 @@ export class AnalysisView {
     this.#controls = controls;
     this.#axisControl = axisControl;
     this.#select = select;
-    this.#periodDescription = periodDescription;
+    this.#periodDescription = periodDescriptionText;
+    this.#historyNote = historyNote;
     this.#main = main;
     this.#live = live;
     this.#cacheButton = cacheButton;
@@ -276,10 +294,12 @@ export class AnalysisView {
     overlay.addEventListener("keydown", this.#handleKeydown);
     overlay.addEventListener("click", this.#handleOverlayClick);
     document.body.append(host);
+    this.#observeHeader(header);
     this.#lockBackground();
     this.#syncScopeOptions();
     this.#syncCacheButton();
     this.#syncMetadataProgress();
+    this.#syncHistoryNote();
     this.#render();
     queueMicrotask(() => heading.focus());
   }
@@ -318,6 +338,11 @@ export class AnalysisView {
     this.#settingsOpen = false;
     for (const id of this.#countUpFrames) cancelAnimationFrame(id);
     this.#countUpFrames = [];
+    this.#theater?.destroy();
+    this.#theater = undefined;
+    this.#latestResult = undefined;
+    this.#headerObserver?.disconnect();
+    this.#headerObserver = undefined;
     this.#uiState = reduceRecapUiState<RecapPresentationDeck>(this.#uiState, { type: "CLOSE" });
     this.#backgroundObserver?.disconnect();
     this.#backgroundObserver = undefined;
@@ -333,6 +358,7 @@ export class AnalysisView {
     this.#overlay = undefined;
     this.#shell = undefined;
     this.#heading = undefined;
+    this.#header = undefined;
     this.#metadataProgress = undefined;
     this.#metadataProgressDetail = undefined;
     this.#metadataProgressBar = undefined;
@@ -341,6 +367,7 @@ export class AnalysisView {
     this.#axisControl = undefined;
     this.#select = undefined;
     this.#periodDescription = undefined;
+    this.#historyNote = undefined;
     this.#main = undefined;
     this.#live = undefined;
     this.#cacheButton = undefined;
@@ -396,6 +423,79 @@ export class AnalysisView {
     this.#pendingFocusKey = postRecapDispatchFocusKey(this.#uiState, event, next);
     this.#uiState = next;
     this.#render();
+  }
+
+  /** 播放時劇場鋪到標題列底下；把標題列高度交給 CSS，讓進度條避開它。 */
+  #observeHeader(header: HTMLElement): void {
+    this.#syncHeaderBlock(header.getBoundingClientRect().height);
+    if (typeof ResizeObserver !== "function") return;
+    this.#headerObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      this.#syncHeaderBlock(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height);
+    });
+    this.#headerObserver.observe(header);
+  }
+
+  /**
+   * 開場 ↔ 播放切換時標題列的高度可能跟著變（作品資料進度在播放時改坐進副標題那一行）。
+   * ResizeObserver 要等下一次 layout 才回報，換場量位置之前先同步量一次。
+   */
+  #syncHeaderBlock(height = this.#header?.getBoundingClientRect().height): void {
+    if (height === undefined || !this.#shell) return;
+    this.#shell.style.setProperty("--ani-header-block", `${Math.round(height)}px`);
+  }
+
+  #ensureTheater(): RecapTheater {
+    this.#theater ??= new RecapTheater({
+      onStart: () => {
+        const result = this.#latestResult;
+        if (result) this.#dispatch({ type: "START_RECAP", deck: buildRecapDeck(result) });
+      },
+      onNext: () => this.#dispatch({ type: "NEXT" }),
+      onPrevious: () => this.#dispatch({ type: "PREVIOUS" }),
+      onGoto: (chapterId) => this.#dispatch({ type: "GOTO_CHAPTER", chapterId }),
+      onOpenEvidence: () => this.#dispatch({ type: "OPEN_EVIDENCE" }),
+      onCloseEvidence: () => this.#dispatch({ type: "CLOSE_EVIDENCE" }),
+      // 從頭重播時改用最新資料：結尾說「從頭播放即可查看最新回顧」就得是真的。
+      onRestart: () => {
+        const result = this.#latestResult;
+        this.#dispatch({ type: "RESTART", deck: result ? buildRecapDeck(result) : undefined });
+      },
+      onDashboard: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "dashboard" })
+    });
+    return this.#theater;
+  }
+
+  /** 開始回顧時期間控制列收起：留一個淡出的影子，背景不會瞬間露出空白。 */
+  #ghostControls(): void {
+    const controls = this.#controls;
+    const shell = this.#shell;
+    if (!controls || !shell || controls.hidden || prefersReducedMotion()) return;
+    const rect = controls.getBoundingClientRect();
+    const shellRect = shell.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const ghost = controls.cloneNode(true) as HTMLElement;
+    ghost.classList.add("ani-analysis-controls-ghost");
+    ghost.removeAttribute("aria-label");
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.inert = true;
+    for (const node of ghost.querySelectorAll("[id]")) node.removeAttribute("id");
+    const sourceSelect = controls.querySelector("select");
+    const ghostSelect = ghost.querySelector("select");
+    if (sourceSelect && ghostSelect) ghostSelect.value = sourceSelect.value;
+    Object.assign(ghost.style, {
+      left: `${rect.left - shellRect.left}px`,
+      top: `${rect.top - shellRect.top}px`,
+      width: `${rect.width}px`
+    });
+    shell.append(ghost);
+    // 只淡透明度、前段就掉完：底下的頁面同時關燈，留著位移或慢淡出都會變成一塊灰影。
+    const fade = ghost.animate(
+      [{ opacity: 1 }, { opacity: 0 }],
+      { duration: 110, easing: "cubic-bezier(0, 0, .2, 1)", fill: "forwards" }
+    );
+    void fade.finished.then(() => ghost.remove(), () => ghost.remove());
   }
 
   #toggleSettings(): void {
@@ -456,7 +556,12 @@ export class AnalysisView {
       fallback?.focus();
       return;
     }
-    const target = resolveCyclicFocusTarget(focusable, deepestActiveElement(), event.shiftKey);
+    const active = deepestActiveElement();
+    // 換章後焦點在 tabindex=-1 的章節標題上：Tab 從它的位置往下走，只有走到兩端才繞回來。
+    const follows = active && trapRoot.contains(active)
+      ? (node: HTMLElement): boolean => Boolean(active.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+      : undefined;
+    const target = resolveCyclicFocusTarget(focusable, active, event.shiftKey, follows);
     if (target) {
       event.preventDefault();
       target.focus();
@@ -502,8 +607,12 @@ export class AnalysisView {
     const axis = this.#selectedAxis === "watched-at"
       ? { axis: this.#selectedAxis, dayBoundaryMode: state.dayBoundaryMode } as const
       : { axis: this.#selectedAxis } as const;
-    const groups = getAnalysisScopeOptionGroups({ asOf, axis });
-    const signature = `${this.#selectedAxis}:${state.dayBoundaryMode}:${asOf.toISOString().slice(0, 10)}`;
+    const previous = this.#scopeOptions.get(this.#selectedScopeKey);
+    const retained = previous && periodIdentity(previous.period) === this.#selectedPeriodIdentity
+      ? createAnalysisScope(axis, previous.period)
+      : undefined;
+    const groups = retainSelectedScopeOption(getAnalysisScopeOptionGroups({ asOf, axis }), retained, asOf);
+    const signature = scopeOptionsSignature(groups);
 
     const options = groups.flatMap((group) => group.options);
     const matching = options.find((option) => periodIdentity(option.scope.period) === this.#selectedPeriodIdentity)
@@ -587,6 +696,15 @@ export class AnalysisView {
     bar.value = presentation.completed;
   }
 
+  #syncHistoryNote(): void {
+    const node = this.#historyNote;
+    const state = this.#state;
+    if (!node || !state) return;
+    const note = state.historyStatus === "ready" ? state.historyNote : undefined;
+    node.hidden = !note;
+    node.textContent = note ?? "";
+  }
+
   async #downloadDebugData(): Promise<void> {
     if (this.#isDownloadingDebugData || this.#isClearingMetadataCache) return;
 
@@ -660,10 +778,22 @@ export class AnalysisView {
     this.#renderedFocusViewKey = focusViewKey;
     this.#syncSurfaceButtons();
     const playing = isRecapPlayback(this.#uiState);
+    const onRecapSurface = this.#uiState.kind !== "dashboard" && this.#uiState.kind !== "closed";
+    // 開場 ↔ 播放會改變外層版面：先量好劇場的位置，讓它從卡片長成全幅（或反向）。
+    const layoutChanging = shell.dataset.playback !== undefined && shell.dataset.playback !== String(playing);
+    const layoutSnapshot: RecapLayoutSnapshot | null = onRecapSurface && layoutChanging && this.#theater?.root.parentElement === main
+      ? this.#theater.snapshotLayout()
+      : null;
+    if (layoutSnapshot && playing) this.#ghostControls();
     this.#controls?.toggleAttribute("hidden", playing);
     shell.dataset.uiKind = this.#uiState.kind;
     shell.dataset.playback = String(playing);
-    main.className = playing ? "ani-analysis-main ani-analysis-main--recap" : "ani-analysis-main";
+    if (layoutChanging) this.#syncHeaderBlock();
+    main.className = playing
+      ? "ani-analysis-main ani-analysis-main--recap"
+      : onRecapSurface
+        ? "ani-analysis-main ani-analysis-main--recap-intro"
+        : "ani-analysis-main";
     main.setAttribute("aria-busy", String(
       state.historyStatus === "loading"
       || (state.historyStatus === "ready" && !metadataIsSettled(state.metadataState, state.entries.length))
@@ -672,20 +802,20 @@ export class AnalysisView {
     if (state.historyStatus === "loading") {
       main.replaceChildren(statusPanel("正在整理你的近一年觀看紀錄", "正在載入各頁紀錄，完成後就能查看月份、季度與年度變化。"));
       this.#setPeriodDescription("載入完成後，就能選擇月份、季度與年度。", false);
-      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
+      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
       return;
     }
     if (state.historyStatus === "error") {
       main.replaceChildren(errorPanel("無法讀取觀看紀錄", state.historyError ?? "請重新整理頁面後再試一次。"));
       this.#setPeriodDescription("觀看紀錄恢復後，期間選單會重新開放。", false);
-      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
+      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
       return;
     }
 
     const scope = this.#scopeOptions.get(this.#selectedScopeKey);
     if (!scope || analysisScopeKey(scope) !== this.#selectedScopeKey) {
       main.replaceChildren(errorPanel("這段期間暫時無法顯示", "請關閉後重新開啟觀看誌。"));
-      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
+      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
       return;
     }
 
@@ -702,24 +832,28 @@ export class AnalysisView {
     } catch (error) {
       console.error("[ani-gamer-heatmap] 分析所選期間失敗", error);
       main.replaceChildren(errorPanel("這段期間暫時無法分析", "請重新整理頁面後再試一次。"));
-      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
+      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
       return;
     }
 
+    // 播放中期間列收起：資料時間往前推造成的描述變化不播報，免得蓋過章節。
     this.#setPeriodDescription(
       `${result.period.label} · ${formatHalfOpenRange(result.period.effectiveRange.startInclusive, result.period.effectiveRange.endExclusive)} · ${axisDescription(result.scope)}`,
-      true
+      !playing
     );
+    this.#latestResult = result;
 
-    if (isRecapPlayback(this.#uiState)) {
-      const freshDeck = buildRecapDeck(result);
+    const liveDeck = onRecapSurface ? buildRecapDeck(result) : undefined;
+    if (liveDeck && isRecapPlayback(this.#uiState)) {
       this.#uiState = reduceRecapUiState<RecapPresentationDeck>(this.#uiState, {
         type: "DATA_UPDATED",
-        fingerprint: freshDeck.fingerprint
+        fingerprint: liveDeck.fingerprint
       });
     }
 
     if (this.#uiState.kind === "dashboard") {
+      this.#theater?.destroy();
+      this.#theater = undefined;
       const reveal = this.#pendingReveal && !prefersReducedMotion();
       this.#pendingReveal = false;
       const dashboard = renderDashboard({
@@ -727,80 +861,55 @@ export class AnalysisView {
         onOpenRecap: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "recap" }),
         reveal
       });
-      this.#applySurfaceEnter(dashboard, "dashboard");
       main.replaceChildren(dashboard);
       if (reveal) this.#runCountUp(main);
       this.#renderedSurface = "dashboard";
-      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
+      this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
       return;
     }
 
-    // 換頁時把舊章節留成退場 ghost：疊在新章節上方溶出，形成雙向交錯。
-    // 同一頁的重複 render（背景資料更新）不重播進場、不做 ghost，避免內容閃爍。
-    const nextViewId = this.#uiState.kind === "recap-intro"
-      ? "intro"
-      : this.#uiState.kind === "recap-outro"
-        ? "outro"
-        : this.#uiState.kind === "recap-chapter" || this.#uiState.kind === "recap-evidence"
-          ? this.#uiState.chapterId
-          : "";
-    const previousRecapRoot = this.#renderedSurface === "recap"
-      ? main.querySelector<HTMLElement>(".ani-recap-stage, .ani-recap-intro")
-      : null;
-    const previousViewId = previousRecapRoot?.dataset.viewId ?? null;
-    const transitionDirection = (this.#uiState.kind === "recap-chapter" || this.#uiState.kind === "recap-outro")
-      && this.#uiState.transition.phase === "running"
-      ? this.#uiState.transition.direction
-      : null;
-    const repeatTransitionRender = transitionDirection !== null && previousViewId === nextViewId;
-    const ghostRoot = transitionDirection && previousRecapRoot && previousViewId !== nextViewId
-      && !prefersReducedMotion()
-      ? previousRecapRoot
-      : null;
-
-    const recap = renderRecapSurface({
-      state: this.#uiState,
-      result,
-      onStart: () => this.#dispatch({ type: "START_RECAP", deck: buildRecapDeck(result) }),
-      onNext: () => this.#dispatch({ type: "NEXT" }),
-      onPrevious: () => this.#dispatch({ type: "PREVIOUS" }),
-      onOpenEvidence: () => this.#dispatch({ type: "OPEN_EVIDENCE" }),
-      onCloseEvidence: () => this.#dispatch({ type: "CLOSE_EVIDENCE" }),
-      onRestart: () => this.#dispatch({ type: "RESTART" }),
-      onDashboard: () => this.#dispatch({ type: "SWITCH_SURFACE", surface: "dashboard" }),
-      onAnimationFinished: () => this.#dispatch({ type: "ANIMATION_FINISHED" })
-    });
-    if (this.#uiState.kind === "recap-intro" && previousViewId !== "intro" && !prefersReducedMotion()) {
-      recap.dataset.enter = "true";
+    if (!liveDeck) return;
+    // 回顧用同一個常駐劇場：背景、進度與操作列不重建，資料更新也不會打斷換場。
+    const theater = this.#ensureTheater();
+    if (theater.root.parentElement !== main) {
+      const fromDashboard = this.#renderedSurface === "dashboard" && !prefersReducedMotion();
+      // 總覽不直接消失：釘在原位淡出，開場卡片同時從半透明浮上來，第一格不會是空白。
+      const outgoing = fromDashboard ? main.firstElementChild : null;
+      const outgoingRect = outgoing instanceof HTMLElement ? outgoing.getBoundingClientRect() : null;
+      const mainRect = outgoingRect ? main.getBoundingClientRect() : null;
+      if (outgoing instanceof HTMLElement && outgoingRect && mainRect) {
+        // 總覽留在 DOM 裡不重新插入：重新插入會讓它的 CSS 進場動畫從頭播放，等於先消失再淡出。
+        for (const child of [...main.children]) if (child !== outgoing) child.remove();
+        outgoing.inert = true;
+        outgoing.setAttribute("aria-hidden", "true");
+        Object.assign(outgoing.style, {
+          position: "absolute",
+          left: `${outgoingRect.left - mainRect.left}px`,
+          top: `${outgoingRect.top - mainRect.top}px`,
+          width: `${outgoingRect.width}px`,
+          margin: "0",
+          pointerEvents: "none"
+        });
+        main.prepend(theater.root);
+        const fade = outgoing.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, easing: "ease-out", fill: "forwards" });
+        void fade.finished.then(() => outgoing.remove(), () => outgoing.remove());
+      } else {
+        main.replaceChildren(theater.root);
+      }
+      if (fromDashboard) {
+        theater.root.animate(
+          [{ opacity: 0.35, transform: "translateY(10px) scale(.985)" }, { opacity: 1, transform: "none" }],
+          { duration: 520, easing: "cubic-bezier(.16, 1, .3, 1)" }
+        );
+      }
     }
-    if (repeatTransitionRender) {
-      // 這場 transition 已經播過了：直接定格，並讓狀態機收尾。
-      recap.dataset.transition = "idle";
-      queueMicrotask(() => this.#dispatch({ type: "ANIMATION_FINISHED" }));
+    theater.render({ state: this.#uiState, result, liveDeck }, layoutSnapshot);
+    if (focusViewChanged) {
+      const announcement = recapAnnouncement(this.#uiState);
+      if (announcement) this.#announce(announcement);
     }
-    this.#applySurfaceEnter(recap, "recap");
-    main.replaceChildren(recap);
-    if (ghostRoot && transitionDirection) {
-      main.append(createRecapGhost(ghostRoot, transitionDirection));
-    }
-    // Chapter and intro numerals count up once per view; skip evidence round-trips,
-    // which re-render the same chapter underneath the closing panel.
-    if (
-      focusViewChanged
-      && this.#uiState.kind !== "recap-evidence"
-      && !previousFocusViewKey.startsWith("recap-evidence")
-    ) this.#runCountUp(main);
     this.#renderedSurface = "recap";
-    this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged);
-  }
-
-  #applySurfaceEnter(root: HTMLElement, surface: "dashboard" | "recap"): void {
-    if (prefersReducedMotion()) return;
-    // The dashboard's own reveal stagger is its entrance; only the recap surface,
-    // which has no per-item reveal, needs a whole-surface "dim the lights" transition.
-    if (surface === "recap" && this.#renderedSurface && this.#renderedSurface !== surface) {
-      root.dataset.surfaceEnter = surface;
-    }
+    this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
   }
 
   #runCountUp(main: HTMLElement): void {
@@ -808,7 +917,6 @@ export class AnalysisView {
     this.#countUpFrames = [];
     if (prefersReducedMotion()) return;
     for (const node of main.querySelectorAll<HTMLElement>("[data-count-to]")) {
-      if (node.closest(".ani-recap-ghost")) continue;
       const target = Number(node.dataset.countTo);
       if (Number.isFinite(target)) this.#animateCountUp(node, target);
     }
@@ -836,7 +944,9 @@ export class AnalysisView {
   #restoreFocusAfterRender(
     main: HTMLElement,
     priorFocus: SemanticFocusSnapshot | undefined,
-    focusViewChanged: boolean
+    focusViewChanged: boolean,
+    /** False on the first render after open(), which focuses the heading itself. */
+    hadRenderedView: boolean
   ): void {
     const requestedFocusKey = this.#pendingFocusKey;
     this.#pendingFocusKey = undefined;
@@ -844,26 +954,48 @@ export class AnalysisView {
       focusViewChanged,
       this.#uiState.kind
     );
+    const recoverLostFocus = focusViewChanged && hadRenderedView;
     queueMicrotask(() => {
       if (this.#main !== main || !main.isConnected) return;
       if (requestedFocusKey) {
         const requested = main.querySelector<HTMLElement>(
           `[data-analysis-focus-key="${requestedFocusKey}"]`
         );
-        (requested ?? main.querySelector<HTMLElement>("[data-recap-focus]"))?.focus();
+        (requested ?? main.querySelector<HTMLElement>("[data-recap-focus]"))?.focus({ preventScroll: true });
         return;
       }
       if (shouldFocusRecapHeading) {
-        main.querySelector<HTMLElement>("[data-recap-focus]")?.focus();
+        // 換場中的 scene 還在位移；preventScroll 避免瀏覽器為了焦點捲動內容。
+        main.querySelector<HTMLElement>("[data-recap-focus]")?.focus({ preventScroll: true });
         return;
       }
-      if (!focusViewChanged && priorFocus) restoreSemanticFocus(main, priorFocus)?.focus();
+      if (!focusViewChanged && priorFocus) {
+        restoreSemanticFocus(main, priorFocus)?.focus();
+        return;
+      }
+      // 「查看完整分析」「回到分析總覽」這類按鈕會跟著舊畫面被移除：焦點掉到 <body> 後
+      // Esc 與 Tab 循環都收不到，改放到新畫面的穩定位置。
+      if (recoverLostFocus && !this.#overlayHasFocus()) this.#focusFallback()?.focus({ preventScroll: true });
     });
   }
 
+  #overlayHasFocus(): boolean {
+    const active = deepestActiveElement();
+    return Boolean(active && this.#overlay?.contains(active));
+  }
+
+  #focusFallback(): HTMLElement | undefined {
+    if (this.#uiState.kind === "dashboard") {
+      return this.#surfaceNav?.querySelector<HTMLElement>('[data-surface="dashboard"]') ?? this.#heading;
+    }
+    return this.#main?.querySelector<HTMLElement>("[data-recap-focus]") ?? this.#heading;
+  }
+
   #setPeriodDescription(text: string, announce: boolean): void {
+    // 只在期間真的改變時播報，避免每次資料更新都蓋掉章節播報。
+    const changed = this.#periodDescription?.textContent !== text;
     if (this.#periodDescription) this.#periodDescription.textContent = text;
-    if (announce) this.#announce(text);
+    if (announce && changed) this.#announce(text);
   }
 
   #announce(text: string): void {
@@ -957,6 +1089,51 @@ const renderScopeOptionGroup = (group: AnalysisScopeOptionGroup): HTMLOptGroupEl
   return node;
 };
 
+const SCOPE_OPTION_GROUP_FOR_PERIOD: Readonly<Record<PeriodDefinition["kind"], AnalysisScopeOptionGroupId>> = {
+  "rolling-days": "rolling",
+  "calendar-month": "calendar-months",
+  "calendar-season": "calendar-seasons",
+  "calendar-year": "calendar-years"
+};
+
+/**
+ * 資料時間往前推（例如保存的紀錄換成剛讀到的頁面、又剛好跨過月初）時，最舊的月份、季度或年度
+ * 會掉出選單。使用者正選著的那一個留在原本群組的最後，期間不會被悄悄換成過去一年。
+ */
+export const retainSelectedScopeOption = (
+  groups: readonly AnalysisScopeOptionGroup[],
+  selected: AnalysisScope | undefined,
+  asOf: Date
+): readonly AnalysisScopeOptionGroup[] => {
+  if (!selected) return groups;
+  const key = analysisScopeKey(selected);
+  if (groups.some((group) => group.options.some((option) => option.key === key))) return groups;
+  let resolved: ResolvedPeriod;
+  try {
+    resolved = resolvePeriod(selected, asOf);
+  } catch {
+    // 在這個資料時間還沒開始的期間不保留。
+    return groups;
+  }
+  const groupId = SCOPE_OPTION_GROUP_FOR_PERIOD[selected.period.kind];
+  return groups.map((group) => group.id === groupId
+    ? {
+        ...group,
+        options: [...group.options, {
+          scope: selected,
+          key: resolved.key,
+          label: resolved.label,
+          periodStatus: resolved.periodStatus
+        }]
+      }
+    : group);
+};
+
+/** 選單內容的指紋：每個選項的 key 與標籤（含「截至 M 月 D 日」），跟著台北日期與期間狀態變。 */
+export const scopeOptionsSignature = (groups: readonly AnalysisScopeOptionGroup[]): string => groups
+  .map((group) => `${group.id}[${group.options.map((option) => `${option.key}=${option.label}`).join(",")}]`)
+  .join("|");
+
 const periodIdentity = (period: PeriodDefinition): string => {
   switch (period.kind) {
     case "rolling-days": return `rolling:${period.days}`;
@@ -986,7 +1163,7 @@ const axisDescription = (scope: AnalysisScope): string => scope.axis === "releas
 
 const isRecapPlayback = (state: RecapUiState): boolean => state.kind === "recap-chapter"
   || state.kind === "recap-evidence"
-  || state.kind === "recap-outro";
+  || state.kind === "recap-summary";
 
 const statusPanel = (title: string, message: string): HTMLElement => {
   const panel = element("section", "ani-analysis-status-panel");
@@ -1007,25 +1184,43 @@ const getFocusableElements = (root: HTMLElement): HTMLElement[] => Array.from(
   root.querySelectorAll<HTMLElement>(
     "button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex='-1'])"
   )
-).filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true" && node.offsetParent !== null);
+).filter((node) => !node.hidden
+  && node.getAttribute("aria-hidden") !== "true"
+  && node.offsetParent !== null
+  // 回顧裡收起的進度列、退場中的畫面都是 inert：不放進 Tab 循環。
+  && node.closest("[inert]") === null);
+
+/** 剛關上的資料依據還在淡出（inert）時又開了一個：Tab 要困在新的那個面板裡。 */
+const RECAP_EVIDENCE_TRAP_SELECTOR = ".ani-recap-evidence-veil:not([inert]) .ani-recap-evidence-panel";
 
 export const getAnalysisFocusTrapRoot = (
   overlay: HTMLElement,
   main: HTMLElement | undefined,
   evidenceOpen: boolean
 ): HTMLElement => evidenceOpen
-  ? main?.querySelector<HTMLElement>(".ani-recap-evidence-panel") ?? overlay
+  ? main?.querySelector<HTMLElement>(RECAP_EVIDENCE_TRAP_SELECTOR) ?? overlay
   : overlay;
 
 export const resolveCyclicFocusTarget = <T>(
   focusable: readonly T[],
   active: T | undefined,
-  shiftKey: boolean
+  shiftKey: boolean,
+  /**
+   * When focus is inside the trap on a node outside the Tab order (a tabindex=-1
+   * heading): whether `node` comes after it in document order.
+   */
+  follows?: (node: T) => boolean
 ): T | undefined => {
   const first = focusable[0];
   const last = focusable.at(-1);
   if (!first || !last) return undefined;
-  if (!active || !focusable.includes(active)) return shiftKey ? last : first;
+  if (!active || !focusable.includes(active)) {
+    if (!follows) return shiftKey ? last : first;
+    const target = shiftKey
+      ? [...focusable].reverse().find((node) => !follows(node))
+      : focusable.find(follows);
+    return target ?? (shiftKey ? last : first);
+  }
   if (shiftKey && active === first) return last;
   if (!shiftKey && active === last) return first;
   return undefined;
@@ -1104,7 +1299,7 @@ export const analysisFocusViewKey = (state: RecapUiState): string => {
     case "recap-intro": return "recap-intro";
     case "recap-chapter": return `recap-chapter:${state.chapterId}`;
     case "recap-evidence": return `recap-evidence:${state.chapterId}`;
-    case "recap-outro": return "recap-outro";
+    case "recap-summary": return "recap-summary";
   }
 };
 
@@ -1245,10 +1440,38 @@ export const analysisCss = `
   animation: ani-analysis-overlay-in var(--ani-dur-3) var(--ani-ease) both;
 }
 .ani-analysis-overlay[data-phase="leaving"] { animation: ani-analysis-overlay-out var(--ani-dur-2) var(--ani-ease) both; }
-.ani-analysis-shell { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 100dvh; animation: ani-analysis-shell-in var(--ani-dur-3) var(--ani-ease-out) both; }
+.ani-analysis-shell { position: relative; display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 100dvh; animation: ani-analysis-shell-in var(--ani-dur-3) var(--ani-ease-out) both; }
+/* 播放時整個觀看誌「關燈」：深色幕在 60ms 內就鋪滿（劇場的 clip-path 正從卡片展開蓋過亮處），
+   回到開場時也在 90ms 內把燈打開（劇場同時收回卡片）。兩個方向都不讓半透明的深淺兩層
+   疊成一片灰。 */
+.ani-analysis-shell { isolation: isolate; }
+.ani-analysis-shell::before { content: ""; position: absolute; z-index: -1; inset: 0; background: #05080f; opacity: 0; pointer-events: none; transition: opacity 90ms cubic-bezier(0, 0, .2, 1); }
+.ani-analysis-shell[data-playback="true"]::before { opacity: 1; transition-duration: 60ms; transition-timing-function: ease-out; }
 .ani-analysis-overlay[data-phase="leaving"] .ani-analysis-shell { animation: ani-analysis-shell-out var(--ani-dur-2) var(--ani-ease) both; }
 .ani-analysis-shell[data-playback="true"] { grid-template-rows: auto minmax(0, 1fr); }
-.ani-analysis-header { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--ani-line); background: var(--ani-surface-veil); padding: max(12px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 12px max(18px, env(safe-area-inset-left)); backdrop-filter: blur(18px); }
+.ani-analysis-header { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--ani-line); background-color: var(--ani-surface-veil); padding: max(12px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 12px max(18px, env(safe-area-inset-left)); backdrop-filter: blur(18px); transition: background-color 90ms var(--ani-ease), border-color 90ms var(--ani-ease); }
+.ani-analysis-header::before { content: ""; position: absolute; z-index: -1; inset: 0 0 -28px; background: linear-gradient(180deg, rgba(3, 6, 14, .62), rgba(3, 6, 14, .22) 62%, transparent); opacity: 0; pointer-events: none; transition: opacity 90ms var(--ani-ease); }
+/* 播放時標題列融進劇場：透明、深色字樣，劇場從它底下一路鋪滿。 */
+.ani-analysis-shell[data-playback="true"] .ani-analysis-header { grid-row: 1; grid-column: 1; align-self: start; border-bottom-color: transparent; background-color: rgba(249, 251, 253, 0); backdrop-filter: none; transition-duration: 60ms; }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-header::before { opacity: 1; }
+/* 標題字跟著底色一起在百來毫秒內換深淺，不在灰色過渡中變得難讀。 */
+.ani-analysis-title, .ani-analysis-subtitle { transition: color 120ms var(--ani-ease); }
+.ani-analysis-shell[data-playback="true"] :is(.ani-analysis-header-inner, .ani-analysis-metadata-progress) { --ani-ink: #f4f7ff; --ani-ink-2: rgba(214, 224, 248, .84); --ani-ink-3: rgba(170, 186, 222, .72); --ani-surface: rgba(146, 172, 228, .12); --ani-surface-sunken: rgba(146, 172, 228, .2); --ani-line: rgba(148, 170, 220, .22); --ani-line-strong: rgba(148, 170, 220, .32); }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-surface-nav { background: rgba(146, 172, 228, .1); }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-surface-nav::before { background: rgba(244, 247, 255, .16); box-shadow: none; }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-metadata-progress-bar { background: rgba(146, 172, 228, .18); }
+/* 播放時作品資料進度改坐進副標題那一行：它出現或消失都不改變標題列高度，劇場與章節不會跟著跳。 */
+.ani-analysis-shell[data-playback="true"] .ani-analysis-header:has(> .ani-analysis-metadata-progress:not([hidden])) .ani-analysis-subtitle { visibility: hidden; }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-metadata-progress { position: absolute; left: 0; right: 0; bottom: 12px; grid-auto-flow: column; grid-template-columns: minmax(0, max-content) minmax(72px, 140px); align-items: center; justify-content: start; gap: 12px; width: min(calc(100% - 36px), calc(var(--rc-stage-width) + 2 * var(--rc-gutter) - 36px)); margin: 0 auto; padding-inline: calc(var(--rc-gutter) - 18px); }
+.ani-analysis-shell[data-ui-kind="recap-summary"] .ani-analysis-metadata-progress { width: min(calc(100% - 36px), calc(var(--rc-poster-width) + 2 * var(--rc-poster-gutter) - 36px)); padding-inline: calc(var(--rc-poster-gutter) - 18px); }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-metadata-progress-header { justify-content: start; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-metadata-progress-bar { height: 4px; }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-main { grid-row: 1 / -1; grid-column: 1; }
+/* 標題列內容對齊劇場內容的左右邊：章節用舞台寬度，結尾海報用海報寬度。 */
+.ani-analysis-shell { --rc-gutter: clamp(28px, 5.2vw, 84px); --rc-stage-width: 1240px; --rc-poster-gutter: clamp(20px, 2.3vw, 36px); --rc-poster-width: 1500px; }
+.ani-analysis-shell[data-playback="true"] .ani-analysis-header-inner { width: min(100%, calc(var(--rc-stage-width) + 2 * var(--rc-gutter) - 36px)); padding-inline: calc(var(--rc-gutter) - 18px); }
+.ani-analysis-shell[data-ui-kind="recap-summary"] .ani-analysis-header-inner { width: min(100%, calc(var(--rc-poster-width) + 2 * var(--rc-poster-gutter) - 36px)); padding-inline: calc(var(--rc-poster-gutter) - 18px); }
+.ani-analysis-controls-ghost { position: absolute; z-index: 0; margin: 0; pointer-events: none; }
 .ani-analysis-header-inner, .ani-analysis-controls-inner, .ani-analysis-main { width: min(100%, 1120px); margin-inline: auto; }
 .ani-analysis-header-inner { display: grid; grid-template-columns: minmax(0, 1fr) max-content max-content; align-items: center; gap: 16px; }
 .ani-analysis-brand { min-width: 0; }
@@ -1291,21 +1514,22 @@ export const analysisCss = `
 .ani-analysis-period-label { color: var(--ani-ink-2); font-size: 11px; font-weight: 900; }
 .ani-analysis-select { width: 100%; min-height: 38px; border: 1px solid var(--ani-line-strong); border-radius: var(--ani-r-sm); background: var(--ani-surface); color: var(--ani-ink); font: inherit; font-size: 12px; padding: 7px 30px 7px 12px; cursor: pointer; }
 .ani-analysis-period-description { min-width: 0; color: var(--ani-ink-3); font-size: 10px; line-height: 1.45; }
+.ani-analysis-history-note { display: block; color: var(--ani-accent-ink); font-weight: 800; }
+.ani-analysis-history-note[hidden] { display: none; }
 .ani-analysis-main { display: grid; padding: 26px 20px max(54px, env(safe-area-inset-bottom)); }
-.ani-analysis-main--recap { position: relative; width: 100%; min-height: 0; padding: 0; background: #060a14; }
+.ani-analysis-main--recap { position: relative; z-index: 1; width: 100%; min-height: 0; padding: 0; background: transparent; }
+.ani-analysis-main--recap-intro { position: relative; }
 .ani-analysis-status-panel { display: grid; place-items: center; align-content: center; min-height: 52vh; border: 1px solid var(--ani-line); border-radius: var(--ani-r-lg); background: var(--ani-surface); box-shadow: var(--ani-shadow-1); padding: 32px; text-align: center; }
 .ani-analysis-status-title { margin: 0; color: var(--ani-ink); font-size: 22px; font-weight: 800; }
 .ani-analysis-status-copy { max-width: 560px; margin: 8px 0 0; color: var(--ani-ink-3); font-size: 13px; }
 .ani-analysis-error-panel { border-color: #fecaca; background: #fff7f7; }
 .ani-analysis-visually-hidden { position: absolute !important; overflow: hidden !important; width: 1px !important; height: 1px !important; clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; }
-[data-surface-enter="recap"] { animation: ani-enter-deepen var(--ani-dur-4) var(--ani-ease-out) both; }
 button:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--ani-accent-bright); outline-offset: 2px; }
 @keyframes ani-analysis-overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ani-analysis-overlay-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes ani-analysis-shell-in { from { opacity: 0; transform: translateY(14px) scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes ani-analysis-shell-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(10px) scale(.99); } }
 @keyframes ani-pop-in { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: none; } }
-@keyframes ani-enter-deepen { from { opacity: 0; transform: translateY(16px) scale(.99); } to { opacity: 1; transform: none; } }
 ${dashboardCss}
 ${recapCss}
 @media (max-width: 760px) {
@@ -1313,6 +1537,9 @@ ${recapCss}
   .ani-analysis-tools { grid-column: 2; grid-row: 1; }
   .ani-analysis-surface-nav { grid-row: 2; grid-column: 1 / -1; width: auto; justify-self: stretch; }
   .ani-analysis-metadata-progress-header { align-items: flex-start; flex-direction: column; gap: 2px; }
+  /* 窄版的導覽換到第二列，副標題不在最底：進度回到標題列下方。 */
+  .ani-analysis-shell[data-playback="true"] .ani-analysis-metadata-progress { position: static; grid-auto-flow: row; grid-template-columns: none; width: auto; margin: 12px 0 2px; padding-inline: 0; }
+  .ani-analysis-shell[data-playback="true"] .ani-analysis-header:has(> .ani-analysis-metadata-progress:not([hidden])) .ani-analysis-subtitle { visibility: visible; }
   .ani-analysis-controls-inner { grid-template-columns: 1fr; }
   .ani-analysis-axis-control { width: auto; justify-self: stretch; }
   .ani-analysis-period-description { order: 3; }

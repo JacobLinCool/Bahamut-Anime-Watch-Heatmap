@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
   collectEpisodeMetadata,
+  overlayMetadataState,
   parseVideoSn,
   type MetadataResolver
 } from "./metadata";
@@ -509,4 +510,87 @@ test("collector treats every discovered unavailable or failed request as termina
     unavailable: 1,
     failed: 2
   });
+});
+
+test("a progress interval coalesces snapshots but always delivers phase changes and the final state", async () => {
+  const snapshots: MetadataState[] = [];
+  const entries = Array.from({ length: 40 }, (_, index) => watchEntry(index + 1));
+  const result = await collectEpisodeMetadata(entries, {
+    concurrency: 4,
+    progressIntervalMilliseconds: 60_000,
+    resolver: async (videoSn) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return bundle(videoSn, 2000 + videoSn);
+    },
+    onProgress: (state) => snapshots.push(state)
+  });
+
+  assert.deepEqual(snapshots.map((state) => state.progress.phase), ["resolving", "complete"]);
+  assert.deepEqual(snapshots.at(-1), result);
+  assert.notEqual(snapshots.at(-1)?.episodes.get(1), result.episodes.get(1));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(snapshots.length, 2);
+
+  const trailing: MetadataState[] = [];
+  let release: (() => void) | undefined;
+  const pending = collectEpisodeMetadata([watchEntry(1), watchEntry(2)], {
+    concurrency: 1,
+    progressIntervalMilliseconds: 20,
+    resolver: async (videoSn) => {
+      if (videoSn === 2) await new Promise<void>((resolve) => { release = resolve; });
+      return bundle(videoSn, 3000 + videoSn);
+    },
+    onProgress: (state) => trailing.push(state)
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  // The suppressed first completion arrives as a trailing snapshot while the second is still pending.
+  assert.deepEqual(trailing.map((state) => state.progress.completed), [0, 1]);
+  release?.();
+  await pending;
+  // After a quiet interval the next change is delivered at once.
+  assert.deepEqual(trailing.map((state) => [state.progress.phase, state.progress.completed]), [
+    ["resolving", 0],
+    ["resolving", 1],
+    ["resolving", 2],
+    ["complete", 2]
+  ]);
+  await assert.rejects(
+    collectEpisodeMetadata([], { resolver: async () => bundle(1), progressIntervalMilliseconds: -1 }),
+    /progressIntervalMilliseconds/
+  );
+});
+
+
+test("a re-collection overlays its settled records on the previous ones instead of freezing them", async () => {
+  // The previous collection was interrupted halfway: 1 and 2 resolved, 3 failed, 4 never ran.
+  const previous: MetadataState = {
+    episodes: new Map([[1, bundle(1, 1001).episode], [2, bundle(2, 1002).episode]]),
+    anime: new Map([[1001, bundle(1, 1001).anime], [1002, bundle(2, 1002).anime]]),
+    issues: [{ videoSn: 3, kind: "network", message: "offline" }],
+    progress: { phase: "resolving", total: 4, completed: 3, available: 2, unavailable: 0, failed: 1 }
+  };
+  const ticks: MetadataState[] = [];
+  const result = await collectEpisodeMetadata([1, 2, 3, 4].map(watchEntry), {
+    concurrency: 1,
+    resolver: async (videoSn) => {
+      if (videoSn === 2) throw new MetadataUnavailableError(videoSn);
+      return bundle(videoSn, 1000 + videoSn);
+    },
+    onProgress: (state) => ticks.push(overlayMetadataState(previous, state))
+  });
+
+  // Before the new collection settles anything, the earlier partial records stay visible.
+  const first = ticks[0];
+  assert.deepEqual([...(first?.episodes.keys() ?? [])], [1, 2]);
+  assert.deepEqual(first?.issues.map((issue) => issue.videoSn), [3]);
+  assert.equal(first?.progress.completed, 0);
+
+  // Records the new collection settles replace the earlier ones as they arrive.
+  const last = ticks.at(-1);
+  assert.deepEqual([...(last?.episodes.keys() ?? [])].sort(), [1, 3, 4]);
+  assert.deepEqual(last?.issues.map((issue) => [issue.videoSn, issue.kind]), [[2, "unavailable"]]);
+  assert.equal(last?.progress.phase, "complete");
+  assert.deepEqual([...result.episodes.keys()].sort(), [1, 3, 4]);
+  // Each intermediate tick grows with the new collection rather than staying at the old snapshot.
+  assert.ok(ticks.some((tick) => tick.episodes.has(3) && tick.progress.phase === "resolving"));
 });

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { realApiResponse } from "./fixtures/metadata-api";
 import {
+  MetadataSchemaError,
   MetadataUnavailableError,
   cloneMetadataBundle,
   parseMetadataResponse,
@@ -127,6 +129,124 @@ test("parseMetadataResponse converts only explicit empty string fields to null",
 
   value.data.anime.maker = "   ";
   assert.throws(() => parseMetadataResponse(value, 49054), /不可只有空白/);
+});
+
+test("real payloads with series sentinels, special episode numbers, and date-only downTime parse", () => {
+  const fetchedAt = new Date("2026-10-16T00:00:00.000Z");
+
+  const hayate = parseMetadataResponse(realApiResponse("dateOnlyDownTime"), 30725, fetchedAt);
+  assert.equal(hayate.anime.seasonStartDateKey, "2007-04-01");
+  assert.equal(hayate.anime.seasonEndDateKey, null);
+  assert.equal(hayate.episode.availableFrom.toISOString(), "2025-08-20T04:00:00.000Z");
+  // Asia/Taipei 00:00 of 2026/10/31: a lower bound for the end of availability.
+  assert.equal(hayate.episode.availableUntil?.toISOString(), "2026-10-30T16:00:00.000Z");
+  assert.equal(hayate.episode.coverUrl, null);
+
+  const prologue = parseMetadataResponse(realApiResponse("prologueEpisode"), 45534, fetchedAt);
+  assert.equal(prologue.episode.episodeNumber, 0);
+  assert.deepEqual(prologue.anime.episodeRefs.map((reference) => reference.episodeNumber), [0, 1, 2]);
+
+  const halfFirst = parseMetadataResponse(realApiResponse("fractionalRequestedEpisode"), 48439, fetchedAt);
+  assert.equal(halfFirst.episode.episodeNumber, 12.5);
+  assert.deepEqual(halfFirst.anime.episodeRefs.map((reference) => reference.episodeNumber), [12.5, 13, 14]);
+
+  const sibling = parseMetadataResponse(realApiResponse("fractionalSiblingEpisode"), 43990, fetchedAt);
+  assert.equal(sibling.episode.episodeNumber, 2);
+  assert.deepEqual(sibling.anime.episodeRefs.map((reference) => reference.episodeNumber), [1, 2, 9, 9.5, 10]);
+  assert.equal("favorite" in sibling.anime, false);
+
+  assert.throws(
+    () => parseMetadataResponse(realApiResponse("unavailable"), 11441, fetchedAt),
+    (error) => error instanceof MetadataUnavailableError && error.videoSn === 11441
+  );
+});
+
+test("only the exact series-date sentinel maps to null", () => {
+  const withSeason = (seasonStart: string, seasonEnd: string): Record<string, unknown> => {
+    const value = apiValue() as { data: { anime: Record<string, unknown> } };
+    value.data.anime.seasonStart = seasonStart;
+    value.data.anime.seasonEnd = seasonEnd;
+    return value;
+  };
+  const sentinel = parseMetadataResponse(withSeason("0000/00/00", "0000/00/00"), 49054);
+  assert.equal(sentinel.anime.seasonStartDateKey, null);
+  assert.equal(sentinel.anime.seasonEndDateKey, null);
+  for (const raw of ["0000/00/01", "0000/0/00", " 0000/00/00", "0000-00-00", "2026/02/30"]) {
+    assert.throws(() => parseMetadataResponse(withSeason("2026/04/02", raw), 49054), MetadataSchemaError, raw);
+  }
+});
+
+test("episode numbers accept any finite non-negative number and nothing else", () => {
+  const withEpisode = (episode: unknown): Record<string, unknown> => {
+    const value = apiValue() as {
+      data: { anime: { episodes: Record<string, Array<Record<string, unknown>>> } };
+    };
+    const target = value.data.anime.episodes["0"]?.[1];
+    if (target) target.episode = episode;
+    return value;
+  };
+  for (const episode of [0, 9.5, 12.5, 1_000]) {
+    assert.equal(parseMetadataResponse(withEpisode(episode), 49054).episode.episodeNumber, episode);
+  }
+  for (const episode of [-1, -0.5, Number.POSITIVE_INFINITY, Number.NaN, "9", null]) {
+    assert.throws(() => parseMetadataResponse(withEpisode(episode), 49054), /非負有限數字/, String(episode));
+  }
+});
+
+test("a date-only downTime is the Taipei start of that day, bounded by the release", () => {
+  const withAvailability = (upTime: string, downTime: string): Record<string, unknown> => {
+    const value = apiValue() as { data: { video: Record<string, unknown> } };
+    value.data.video.upTime = upTime;
+    value.data.video.downTime = downTime;
+    return value;
+  };
+  assert.equal(
+    parseMetadataResponse(withAvailability("2026/05/21 01:00", "2026/07/02"), 49054)
+      .episode.availableUntil?.toISOString(),
+    "2026-07-01T16:00:00.000Z"
+  );
+  // The end lies on the release day, so the release instant is the tighter certain bound.
+  assert.equal(
+    parseMetadataResponse(withAvailability("2026/05/21 01:00", "2026/05/21"), 49054)
+      .episode.availableUntil?.toISOString(),
+    "2026-05-20T17:00:00.000Z"
+  );
+  assert.throws(
+    () => parseMetadataResponse(withAvailability("2026/05/21 01:00", "2026/05/20"), 49054),
+    /不可早於/
+  );
+  for (const raw of ["2026/02/30", "2026/7/02", "2026/07/02 ", "2026-07-02", "2026/07/02 1:00"]) {
+    assert.throws(() => parseMetadataResponse(withAvailability("2026/05/21 01:00", raw), 49054), raw);
+  }
+});
+
+test("only field failures of an identified payload are schema errors that may be cached", () => {
+  const wrongData = apiValue() as { data: { video: Record<string, unknown> } };
+  wrongData.data.video.duration = -1;
+  assert.throws(() => parseMetadataResponse(wrongData, 49054), MetadataSchemaError);
+  const identified = (mutate: (data: { video: Record<string, unknown>; anime: Record<string, unknown> }) => void) => {
+    const value = apiValue() as { data: { video: Record<string, unknown>; anime: Record<string, unknown> } };
+    mutate(value.data);
+    return value;
+  };
+  for (const envelope of [
+    { error: { message: "請求過於頻繁" } },
+    { data: {}, error: { message: "unknown" } },
+    {},
+    // Placeholders a maintenance page or partial outage may return.
+    { data: null },
+    { data: [] },
+    { data: {} },
+    { data: { video: {}, anime: {} } },
+    apiValue(49055),
+    identified((data) => { data.anime.animeSn = 999; }),
+    identified((data) => { delete data.video.videoSn; })
+  ]) {
+    assert.throws(
+      () => parseMetadataResponse(envelope, 49054),
+      (error) => error instanceof Error && !(error instanceof MetadataSchemaError)
+    );
+  }
 });
 
 test("parseMetadataResponse enforces request, anime, and episode-ref identity", () => {

@@ -1,13 +1,17 @@
 import {
+  createInvalidMetadata,
   createUnavailableMetadata,
-  isUnavailableMetadataFresh,
+  episodeMetadataCacheKey,
+  invalidMetadataCacheKey,
   metadataBundleCacheItems,
   readMetadataCache,
   unavailableMetadataCacheKey,
-  type MetadataCacheStorage
+  type MetadataCacheStorage,
+  type UnavailableMetadata
 } from "./metadata-cache";
 import { MetadataCoordinator } from "./metadata-coordinator";
 import {
+  MetadataSchemaError,
   MetadataUnavailableError,
   cloneMetadataBundle,
   parseMetadataResponse
@@ -81,11 +85,12 @@ export class MetadataService {
   }
 
   async #resolveForEpoch(videoSn: number, epoch: string): Promise<MetadataBundle> {
+    const lookupAt = validatedNow(this.#now);
     let cacheResult;
     try {
       cacheResult = await this.#coordinator.runCacheOperation(
         epoch,
-        () => readMetadataCache(this.#storage, videoSn)
+        () => readMetadataCache(this.#storage, videoSn, lookupAt)
       );
     } catch (error) {
       throw new MetadataServiceError(
@@ -98,8 +103,9 @@ export class MetadataService {
 
     const lookup = cacheResult.value;
     if (lookup.kind === "hit") return lookup.bundle;
-    if (lookup.kind === "unavailable" && isUnavailableMetadataFresh(lookup.record, validatedNow(this.#now))) {
-      throw new MetadataUnavailableError(videoSn);
+    if (lookup.kind === "unavailable") throw new MetadataUnavailableError(videoSn);
+    if (lookup.kind === "invalid-response") {
+      throw new MetadataServiceError("invalid-response", videoSn, lookup.record.message);
     }
 
     const endpoint = new URL(METADATA_API_URL);
@@ -149,14 +155,16 @@ export class MetadataService {
       bundle = parseMetadataResponse(value, videoSn, fetchedAt);
     } catch (error) {
       if (error instanceof MetadataUnavailableError) {
-        await this.#persistUnavailable(epoch, videoSn, fetchedAt);
+        await this.#persistUnavailable(epoch, videoSn, fetchedAt, lookup.previousUnavailable);
         throw error;
       }
-      throw new MetadataServiceError(
-        "invalid-response",
-        videoSn,
-        `metadata API response 格式無效：${errorMessage(error)}`
-      );
+      const message = `metadata API response 格式無效：${errorMessage(error)}`;
+      // Only a well-formed data payload that fails the schema is deterministic
+      // enough to cache; envelope and unknown error responses may be transient.
+      if (error instanceof MetadataSchemaError) {
+        await this.#persistInvalid(epoch, videoSn, fetchedAt, message);
+      }
+      throw new MetadataServiceError("invalid-response", videoSn, message);
     }
 
     await this.#persistBundle(epoch, bundle);
@@ -168,7 +176,10 @@ export class MetadataService {
     try {
       const result = await this.#coordinator.runCacheOperation(epoch, async () => {
         await this.#storage.set(metadataBundleCacheItems(bundle));
-        await this.#storage.remove([unavailableMetadataCacheKey(videoSn)]);
+        await this.#storage.remove([
+          unavailableMetadataCacheKey(videoSn),
+          invalidMetadataCacheKey(videoSn)
+        ]);
       });
       if (!result.accepted) throw cacheInvalidated(videoSn);
     } catch (error) {
@@ -181,12 +192,38 @@ export class MetadataService {
     }
   }
 
-  async #persistUnavailable(epoch: string, videoSn: number, observedAt: Date): Promise<void> {
+  async #persistUnavailable(
+    epoch: string,
+    videoSn: number,
+    observedAt: Date,
+    previous: UnavailableMetadata | null
+  ): Promise<void> {
+    await this.#persistNegative(epoch, videoSn, "unavailable", {
+      [unavailableMetadataCacheKey(videoSn)]: createUnavailableMetadata(videoSn, observedAt, previous)
+    }, [invalidMetadataCacheKey(videoSn)]);
+  }
+
+  async #persistInvalid(epoch: string, videoSn: number, observedAt: Date, message: string): Promise<void> {
+    await this.#persistNegative(epoch, videoSn, "invalid-response", {
+      [invalidMetadataCacheKey(videoSn)]: createInvalidMetadata(videoSn, message, observedAt)
+    }, [unavailableMetadataCacheKey(videoSn)]);
+  }
+
+  /**
+   * Keeps at most one negative record per videoSn and drops a stale episode
+   * record, which would otherwise shadow the negative answer and refetch forever.
+   */
+  async #persistNegative(
+    epoch: string,
+    videoSn: number,
+    label: string,
+    items: Record<string, unknown>,
+    supersededKeys: readonly string[]
+  ): Promise<void> {
     try {
       const result = await this.#coordinator.runCacheOperation(epoch, async () => {
-        await this.#storage.set({
-          [unavailableMetadataCacheKey(videoSn)]: createUnavailableMetadata(videoSn, observedAt)
-        });
+        await this.#storage.set(items);
+        await this.#storage.remove([episodeMetadataCacheKey(videoSn), ...supersededKeys]);
       });
       if (!result.accepted) throw cacheInvalidated(videoSn);
     } catch (error) {
@@ -194,7 +231,7 @@ export class MetadataService {
       throw new MetadataServiceError(
         "invalid-cache",
         videoSn,
-        `無法保存 unavailable metadata cache：${errorMessage(error)}`
+        `無法保存 ${label} metadata cache：${errorMessage(error)}`
       );
     }
   }

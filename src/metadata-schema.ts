@@ -7,6 +7,7 @@ import type {
 } from "./model";
 
 const TAIPEI_OFFSET_MILLISECONDS = 8 * 60 * 60 * 1000;
+const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
 const UNAVAILABLE_MESSAGE = "目前無此動畫或動畫授權已到期！";
 const MAX_GENERAL_STRING_LENGTH = 2_048;
 const MAX_URL_LENGTH = 4_096;
@@ -14,6 +15,16 @@ const MAX_TAG_COUNT = 100;
 const MAX_TAG_LENGTH = 256;
 const MAX_EPISODE_REF_COUNT = 10_000;
 const MAX_GROUP_KEY_LENGTH = 128;
+/** The API's placeholder for an unknown series boundary date. */
+const UNKNOWN_DATE_SENTINEL = "0000/00/00";
+
+/**
+ * Identifies the set of payloads parseMetadataResponse accepts. Bump it whenever
+ * a parsing rule changes; negative cache records written by another version are
+ * ignored so a schema fix applies to previously rejected episodes immediately.
+ * v2: series date sentinel, non-integer episode numbers, date-only downTime.
+ */
+export const METADATA_PARSER_VERSION = 2;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -24,6 +35,18 @@ export class MetadataUnavailableError extends Error {
     super(message);
     this.name = "MetadataUnavailableError";
     this.videoSn = videoSn;
+  }
+}
+
+/**
+ * A payload identified as the requested episode whose fields do not satisfy
+ * the schema. Unlike envelope, placeholder or error responses, the same payload
+ * is expected again on retry, so it may be cached as a negative result.
+ */
+export class MetadataSchemaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MetadataSchemaError";
   }
 }
 
@@ -50,13 +73,15 @@ export const parseMetadataResponse = (
     throw new Error("API 回傳未識別的錯誤格式");
   }
 
+  // Identify the payload before judging its fields: an empty, placeholder or
+  // foreign `data` (for example during maintenance) may be transient, so these
+  // failures stay plain errors and are never cached.
   const data = requireRecord(response.data, "API data");
   const video = requireRecord(data.video, "API data.video");
   const anime = requireRecord(data.anime, "API data.anime");
   const videoSn = requirePositiveSafeInteger(video.videoSn, "data.video.videoSn");
   const videoAnimeSn = requirePositiveSafeInteger(video.animeSn, "data.video.animeSn");
   const animeSn = requirePositiveSafeInteger(anime.animeSn, "data.anime.animeSn");
-
   if (videoSn !== requestedVideoSn) {
     throw new Error("API videoSn 與請求不一致");
   }
@@ -64,6 +89,20 @@ export const parseMetadataResponse = (
     throw new Error("API video/anime 的 animeSn 不一致");
   }
 
+  try {
+    return parseMetadataFields(video, anime, videoSn, animeSn, fetchedAt);
+  } catch (error) {
+    throw new MetadataSchemaError(error instanceof Error ? error.message : String(error));
+  }
+};
+
+const parseMetadataFields = (
+  video: JsonRecord,
+  anime: JsonRecord,
+  videoSn: number,
+  animeSn: number,
+  fetchedAt: Date
+): MetadataBundle => {
   const episodeRefs = parseEpisodeRefs(anime.episodes);
   const matchingRefs = episodeRefs.filter((reference) => reference.videoSn === videoSn);
   if (matchingRefs.length !== 1) {
@@ -75,6 +114,10 @@ export const parseMetadataResponse = (
   }
 
   const observedAt = cloneDate(fetchedAt);
+  const availableFrom = parseTaipeiDateTime(
+    requireString(video.upTime, "data.video.upTime", MAX_GENERAL_STRING_LENGTH),
+    "data.video.upTime"
+  );
   const platformSnapshot: AnimePlatformSnapshot = {
     score: requireFiniteNumberInRange(anime.score, "data.anime.score", 0, 5),
     reviewCount: requireNonNegativeSafeInteger(anime.reviewCount, "data.anime.reviewCount"),
@@ -87,11 +130,8 @@ export const parseMetadataResponse = (
     groupKey: matchingRef.groupKey,
     episodeIndex: requireNonNegativeSafeInteger(anime.episodeIndex, "data.anime.episodeIndex"),
     episodeNumber: matchingRef.episodeNumber,
-    availableFrom: parseTaipeiDateTime(
-      requireString(video.upTime, "data.video.upTime", MAX_GENERAL_STRING_LENGTH),
-      "data.video.upTime"
-    ),
-    availableUntil: parseNullableTaipeiDateTime(video.downTime, "data.video.downTime"),
+    availableFrom,
+    availableUntil: parseAvailabilityEnd(video.downTime, "data.video.downTime", availableFrom),
     durationMinutes: requireNonNegativeSafeInteger(video.duration, "data.video.duration"),
     coverUrl: parseNullableHttpsUrl(video.cover, "data.video.cover"),
     videoType: requireNonNegativeSafeInteger(video.type, "data.video.type"),
@@ -212,7 +252,9 @@ const parseEpisodeRefs = (value: unknown): readonly EpisodeRef[] => {
       seenVideoSns.add(videoSn);
       references.push({
         videoSn,
-        episodeNumber: requirePositiveSafeInteger(
+        // 0 (prologue) and fractional labels such as 9.5 are real API facts;
+        // structural analytics only use positive integers and exclude the rest.
+        episodeNumber: requireNonNegativeFiniteNumber(
           entry.episode,
           `data.anime.episodes.${groupKey}[${index}].episode`
         ),
@@ -239,14 +281,24 @@ const parseTags = (value: unknown): readonly string[] => {
   ));
 };
 
-const parseNullableTaipeiDateTime = (value: unknown, label: string): Date | null => {
+const parseAvailabilityEnd = (value: unknown, label: string, availableFrom: Date): Date | null => {
   const raw = requireString(value, label, MAX_GENERAL_STRING_LENGTH);
-  return raw === "" ? null : parseTaipeiDateTime(raw, label);
+  if (raw === "") return null;
+  if (!/^\d{4}\/\d{2}\/\d{2}$/.test(raw)) return parseTaipeiDateTime(raw, label);
+
+  // A date-only end is known to the day. Asia/Taipei 00:00 of that day is a
+  // lower bound, so "still available" claims derived from it stay certain.
+  // On the release day itself the release instant is the tighter bound.
+  const startOfDay = parseTaipeiDateTime(`${raw} 00:00`, label);
+  const releaseIsSameDay = startOfDay.getTime() <= availableFrom.getTime()
+    && availableFrom.getTime() < startOfDay.getTime() + DAY_MILLISECONDS;
+  return releaseIsSameDay ? cloneDate(availableFrom) : startOfDay;
 };
 
 const parseNullableTaipeiDateKey = (value: unknown, label: string): string | null => {
   const raw = requireString(value, label, MAX_GENERAL_STRING_LENGTH);
-  return raw === "" ? null : parseTaipeiDateKey(raw, label);
+  // Series boundaries are only consistency evidence, so unknown maps to null.
+  return raw === "" || raw === UNKNOWN_DATE_SENTINEL ? null : parseTaipeiDateKey(raw, label);
 };
 
 const parseNullableText = (value: unknown, label: string): string | null => {
@@ -329,6 +381,13 @@ const requirePositiveSafeInteger = (value: unknown, label: string): number => {
 const requireNonNegativeSafeInteger = (value: unknown, label: string): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${label} 必須是非負安全整數`);
+  }
+  return value;
+};
+
+const requireNonNegativeFiniteNumber = (value: unknown, label: string): number => {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} 必須是非負有限數字`);
   }
   return value;
 };

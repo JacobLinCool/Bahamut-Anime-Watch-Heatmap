@@ -1,16 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { realApiResponse, type RealApiResponseName } from "./fixtures/metadata-api";
 import {
-  UNAVAILABLE_CACHE_TTL_MILLISECONDS,
+  INVALID_RESPONSE_CACHE_TTL_MILLISECONDS,
+  animeMetadataCacheKey,
   clearMetadataCache,
+  createInvalidMetadata,
   episodeMetadataCacheKey,
+  invalidMetadataCacheKey,
   metadataBundleCacheItems,
+  metadataBundleToWire,
+  parseStoredUnavailableMetadata,
   readMetadataCache,
+  unavailableCacheTtlMilliseconds,
   unavailableMetadataCacheKey,
   type MetadataCacheStorage
 } from "./metadata-cache";
 import { MetadataCoordinator, type MetadataCoordinatorBackend } from "./metadata-coordinator";
-import { MetadataUnavailableError, parseMetadataResponse } from "./metadata-schema";
+import {
+  METADATA_PARSER_VERSION,
+  MetadataUnavailableError,
+  parseMetadataResponse
+} from "./metadata-schema";
 import {
   MetadataService,
   MetadataServiceError,
@@ -216,7 +227,8 @@ test("known unavailable response is negatively cached until the exact TTL bounda
   assert.equal(fetchCount, 1);
   assert.equal(Object.hasOwn(harness.storage.values, unavailableMetadataCacheKey(49054)), true);
 
-  clock = new Date(clock.getTime() + UNAVAILABLE_CACHE_TTL_MILLISECONDS - 1);
+  const ttl = unavailableCacheTtlMilliseconds({ videoSn: 49054, confirmations: 0 });
+  clock = new Date(clock.getTime() + ttl - 1);
   await assert.rejects(harness.service.resolveEpisode(49054), MetadataUnavailableError);
   assert.equal(fetchCount, 1);
 
@@ -291,5 +303,183 @@ test("network, HTTP, and malformed API failures retain typed service errors", as
       harness.service.resolveEpisode(49054),
       (error) => error instanceof MetadataServiceError && error.kind === expectedKind
     );
+  }
+});
+
+const UNAVAILABLE_RESPONSE = { error: { message: "目前無此動畫或動畫授權已到期！" } };
+
+test("each renewed unavailable answer extends the backoff and keeps the first observation", async () => {
+  const firstAt = new Date("2026-07-14T00:00:00.000Z");
+  let clock = firstAt;
+  let fetchCount = 0;
+  const harness = createHarness({
+    now: () => new Date(clock.getTime()),
+    fetcher: async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify(UNAVAILABLE_RESPONSE));
+    }
+  });
+  const stored = () => parseStoredUnavailableMetadata(
+    harness.storage.values[unavailableMetadataCacheKey(49054)],
+    49054
+  );
+
+  for (let confirmations = 0; confirmations < 3; confirmations += 1) {
+    await assert.rejects(harness.service.resolveEpisode(49054), MetadataUnavailableError);
+    assert.equal(fetchCount, confirmations + 1);
+    assert.deepEqual(stored(), {
+      videoSn: 49054,
+      observedAt: clock,
+      firstObservedAt: firstAt,
+      confirmations
+    });
+    const ttl = unavailableCacheTtlMilliseconds({ videoSn: 49054, confirmations });
+    clock = new Date(clock.getTime() + ttl - 1);
+    await assert.rejects(harness.service.resolveEpisode(49054), MetadataUnavailableError);
+    assert.equal(fetchCount, confirmations + 1);
+    clock = new Date(clock.getTime() + 1);
+  }
+});
+
+test("a schema failure is negatively cached for 24 hours with the same message", async () => {
+  let clock = new Date("2026-07-14T00:00:00.000Z");
+  let fetchCount = 0;
+  const malformed = apiValue() as { data: { video: Record<string, unknown> } };
+  malformed.data.video.duration = -1;
+  let body: unknown = malformed;
+  const harness = createHarness({
+    now: () => new Date(clock.getTime()),
+    fetcher: async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify(body));
+    }
+  });
+  const rejectsWith = async (message: RegExp | string) => {
+    await assert.rejects(harness.service.resolveEpisode(49054), (error) =>
+      error instanceof MetadataServiceError
+      && error.kind === "invalid-response"
+      && (typeof message === "string" ? error.message === message : message.test(error.message)));
+  };
+
+  await rejectsWith(/metadata API response 格式無效：/);
+  assert.equal(fetchCount, 1);
+  const record = harness.storage.values[invalidMetadataCacheKey(49054)] as { message: string; parserVersion: number };
+  assert.equal(record.parserVersion, METADATA_PARSER_VERSION);
+
+  clock = new Date(clock.getTime() + INVALID_RESPONSE_CACHE_TTL_MILLISECONDS - 1);
+  await rejectsWith(record.message);
+  assert.equal(fetchCount, 1);
+
+  clock = new Date(clock.getTime() + 1);
+  body = apiValue();
+  assert.equal((await harness.service.resolveEpisode(49054)).episode.videoSn, 49054);
+  assert.equal(fetchCount, 2);
+  assert.equal(Object.hasOwn(harness.storage.values, invalidMetadataCacheKey(49054)), false);
+});
+
+test("an invalid-response record from another parser version is refetched at once", async () => {
+  let fetchCount = 0;
+  const storage = new MemoryStorage({
+    [invalidMetadataCacheKey(30725)]: createInvalidMetadata(
+      30725,
+      "metadata API response 格式無效：data.video.downTime 格式必須為 YYYY/MM/DD HH:mm",
+      new Date("2026-07-14T00:00:00.000Z"),
+      METADATA_PARSER_VERSION - 1
+    )
+  });
+  const harness = createHarness({
+    storage,
+    fetcher: async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify(realApiResponse("dateOnlyDownTime")));
+    }
+  });
+  const resolved = await harness.service.resolveEpisode(30725);
+  assert.equal(resolved.episode.availableUntil?.toISOString(), "2026-10-30T16:00:00.000Z");
+  assert.equal(fetchCount, 1);
+  assert.equal(Object.hasOwn(storage.values, invalidMetadataCacheKey(30725)), false);
+});
+
+test("transient failures are never negatively cached", async () => {
+  const cases: Array<[string, () => Promise<Awaited<ReturnType<MetadataFetcher>>>]> = [
+    ["network", async () => { throw new Error("offline"); }],
+    ["http 429", async () => new Response("slow down", { status: 429 })],
+    ["http 503", async () => new Response("no", { status: 503 })],
+    ["invalid json", async () => new Response("<html>maintenance</html>")],
+    ["unknown error envelope", async () => new Response(JSON.stringify({ error: { message: "請稍後再試" } }))],
+    ["data and error", async () => new Response(JSON.stringify({ data: {}, error: {} }))],
+    ["null data", async () => new Response(JSON.stringify({ data: null }))],
+    ["empty array data", async () => new Response(JSON.stringify({ data: [] }))],
+    ["empty data", async () => new Response(JSON.stringify({ data: {} }))],
+    ["empty video and anime", async () => new Response(JSON.stringify({ data: { video: {}, anime: {} } }))],
+    ["another episode", async () => new Response(JSON.stringify(apiValue(49055)))]
+  ];
+  for (const [label, respond] of cases) {
+    let fetchCount = 0;
+    const harness = createHarness({
+      fetcher: async () => {
+        fetchCount += 1;
+        return respond();
+      }
+    });
+    await assert.rejects(harness.service.resolveEpisode(49054), MetadataServiceError, label);
+    await assert.rejects(harness.service.resolveEpisode(49054), MetadataServiceError, label);
+    assert.equal(fetchCount, 2, label);
+    assert.deepEqual(Object.keys(harness.storage.values), [], label);
+  }
+});
+
+test("a delisted episode whose anime index dropped it stops refetching", async () => {
+  const cached = parseMetadataResponse(apiValue(), 49054, new Date("2026-07-01T00:00:00.000Z"));
+  const wire = metadataBundleToWire(cached);
+  const animeKey = animeMetadataCacheKey(cached.anime.animeSn);
+  const storage = new MemoryStorage({
+    [episodeMetadataCacheKey(49054)]: wire.episode,
+    // A sibling's later fetch rewrote the shared anime record without this episode.
+    [animeKey]: { ...wire.anime, episodeRefs: [] },
+    [invalidMetadataCacheKey(49054)]: createInvalidMetadata(
+      49054,
+      "old failure",
+      new Date("2026-07-01T00:00:00.000Z")
+    )
+  });
+  let fetchCount = 0;
+  const harness = createHarness({
+    storage,
+    fetcher: async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify(UNAVAILABLE_RESPONSE));
+    }
+  });
+
+  await assert.rejects(harness.service.resolveEpisode(49054), MetadataUnavailableError);
+  assert.equal(fetchCount, 1);
+  assert.equal(Object.hasOwn(storage.values, episodeMetadataCacheKey(49054)), false);
+  assert.equal(Object.hasOwn(storage.values, invalidMetadataCacheKey(49054)), false);
+  assert.equal(Object.hasOwn(storage.values, animeKey), true);
+
+  await assert.rejects(harness.service.resolveEpisode(49054), MetadataUnavailableError);
+  assert.equal(fetchCount, 1);
+});
+
+test("real payloads that the first parser rejected now resolve and cache", async () => {
+  const cases: Array<[RealApiResponseName, number]> = [
+    ["dateOnlyDownTime", 30725],
+    ["prologueEpisode", 45534],
+    ["fractionalRequestedEpisode", 48439],
+    ["fractionalSiblingEpisode", 43990]
+  ];
+  for (const [name, videoSn] of cases) {
+    let fetchCount = 0;
+    const harness = createHarness({
+      fetcher: async () => {
+        fetchCount += 1;
+        return new Response(JSON.stringify(realApiResponse(name)));
+      }
+    });
+    const first = await harness.service.resolveEpisode(videoSn);
+    assert.deepEqual(await harness.service.resolveEpisode(videoSn), first, name);
+    assert.equal(fetchCount, 1, name);
+    assert.equal((await readMetadataCache(harness.storage, videoSn)).kind, "hit", name);
   }
 });

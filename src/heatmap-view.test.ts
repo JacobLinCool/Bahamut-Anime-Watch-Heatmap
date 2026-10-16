@@ -6,6 +6,7 @@ import {
   HeatmapView,
   heatmapCss
 } from "./heatmap-view";
+import { toTaipeiDateKey } from "./time";
 
 type Listener = (event: Record<string, unknown>) => void;
 
@@ -549,3 +550,54 @@ const collectClassNames = (root: FakeNode, includeShadow: boolean): string[] => 
   return findElements(root, (element) => element.className !== "", includeShadow)
     .map((element) => element.className);
 };
+
+test("a refresh note renders beside the total only while history is shown", () => {
+  const root = new FakeElement("section");
+  root.id = HEATMAP_ROOT_ID;
+  fakeDocument.body.append(root);
+  const view = new HeatmapView(root as unknown as HTMLElement, {
+    onBoundaryModeChange: () => undefined,
+    onOpenAnalysis: () => undefined
+  });
+  const notes = (): FakeElement[] => findElements(root.shadowRoot, (element) => element.className === "ani-heatmap-note");
+
+  view.render([], "calendar", { note: "更新中…" });
+  assert.deepEqual(notes().map((note) => note.textContent), ["更新中…"]);
+  const title = findElement(root.shadowRoot, (element) => element.className === "ani-heatmap-title");
+  assert.equal(title?.childNodes.at(-1), notes()[0]);
+  // The switch stays usable: a note never blocks interaction like loading does.
+  assert.equal(
+    findElements(root.shadowRoot, (element) => element.className === "ani-heatmap-switch-button")
+      .every((button) => !button.disabled),
+    true
+  );
+
+  view.render([], "calendar", { loading: true, note: "更新中…" });
+  assert.equal(notes().length, 0);
+  view.render([], "calendar", { error: "讀取失敗", note: "更新中…" });
+  assert.equal(notes().length, 0);
+  view.render([], "calendar");
+  assert.equal(notes().length, 0);
+  assert.match(heatmapCss, /\.ani-heatmap-note \{/);
+  view.destroy();
+});
+
+test("the total counts only the watches the grid draws when the saved snapshot is days old", () => {
+  const root = new FakeElement("section");
+  root.id = HEATMAP_ROOT_ID;
+  fakeDocument.body.append(root);
+  const view = new HeatmapView(root as unknown as HTMLElement, {
+    onBoundaryModeChange: () => undefined,
+    onOpenAnalysis: () => undefined
+  });
+  const day = 24 * 60 * 60 * 1_000;
+  const watch = (daysAgo: number, videoSn: number) => {
+    const watchedAt = new Date(Date.now() - daysAgo * day);
+    return { videoSn, dateKey: toTaipeiDateKey(watchedAt, "calendar"), watchedAt, title: "動畫", episode: "第 1 集" };
+  };
+  // 10 天前保存的快照：它的一年窗口比今天的格子早 10 天開始，第 370 天前那筆畫不出來。
+  view.render([watch(370, 1), watch(30, 2), watch(1, 3)], "calendar", { note: "更新中…" });
+  const total = findElement(root.shadowRoot, (element) => element.className === "ani-heatmap-total");
+  assert.equal(total?.textContent, "過去一年共有 2 次觀看");
+  view.destroy();
+});

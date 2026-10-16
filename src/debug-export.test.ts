@@ -1,49 +1,63 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendRequestLog,
   buildDebugExport,
   CACHE_EPOCH_SESSION_KEY,
   createMetadataDebugSnapshot,
   debugExportFilename,
   DEBUG_EXPORT_FORMAT,
+  MAX_REQUEST_LOG_ENTRIES,
   parseMetadataDebugSnapshotWire,
+  REQUEST_LOG_SESSION_KEY,
   REQUEST_STARTS_SESSION_KEY
 } from "./debug-export";
-import { unavailableMetadataCacheKey } from "./metadata-cache";
+import { emptyHistoryLoadDiagnostics, HISTORY_CACHE_STORAGE_KEY } from "./history-cache";
+import { createInvalidMetadata, invalidMetadataCacheKey, unavailableMetadataCacheKey } from "./metadata-cache";
 import type { AnimeMetadata, EpisodeMetadata, MetadataState, WatchEntry } from "./model";
 
 describe("metadata debug snapshot", () => {
-  it("exports only metadata cache records and preserves unavailable evidence", () => {
+  it("exports only metadata cache records and preserves negative evidence", () => {
     const unavailableKey = unavailableMetadataCacheKey(20219);
+    const invalidKey = invalidMetadataCacheKey(30725);
+    const invalid = createInvalidMetadata(30725, "格式無效", new Date("2026-07-14T11:00:00.000Z"));
     const snapshot = createMetadataDebugSnapshot({
       extensionVersion: "0.2.0",
       capturedAt: new Date("2026-07-14T12:00:00.000Z"),
       localValues: {
         "ani-gamer-heatmap-day-boundary-mode": "calendar",
+        [HISTORY_CACHE_STORAGE_KEY]: { accountHash: "a".repeat(64) },
         [unavailableKey]: {
           schemaVersion: 1,
           kind: "unavailable",
           videoSn: 20219,
           observedAt: "2026-07-14T11:30:00.000Z"
-        }
+        },
+        [invalidKey]: invalid
       },
       sessionValues: {
         [CACHE_EPOCH_SESSION_KEY]: "epoch-1",
-        [REQUEST_STARTS_SESSION_KEY]: [100, 200]
+        [REQUEST_STARTS_SESSION_KEY]: [100, 200],
+        [REQUEST_LOG_SESSION_KEY]: [50, 100, 200]
       }
     });
 
-    expect(snapshot.cacheEntries).toEqual([{
-      key: unavailableKey,
-      value: {
-        schemaVersion: 1,
-        kind: "unavailable",
-        videoSn: 20219,
-        observedAt: "2026-07-14T11:30:00.000Z"
+    expect(snapshot.cacheEntries).toEqual([
+      { key: invalidKey, value: invalid },
+      {
+        key: unavailableKey,
+        value: {
+          schemaVersion: 1,
+          kind: "unavailable",
+          videoSn: 20219,
+          observedAt: "2026-07-14T11:30:00.000Z"
+        }
       }
-    }]);
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain("accountHash");
     expect(snapshot.coordination).toEqual({
       cacheEpoch: "epoch-1",
-      requestStarts: [100, 200]
+      requestStarts: [100, 200],
+      requestLog: [50, 100, 200]
     });
     expect(parseMetadataDebugSnapshotWire(snapshot)).toEqual(snapshot);
   });
@@ -55,7 +69,7 @@ describe("metadata debug snapshot", () => {
       localValues: {},
       sessionValues: {}
     });
-    expect(snapshot.coordination).toEqual({ cacheEpoch: null, requestStarts: null });
+    expect(snapshot.coordination).toEqual({ cacheEpoch: null, requestStarts: null, requestLog: null });
 
     expect(() => parseMetadataDebugSnapshotWire({
       ...snapshot,
@@ -81,7 +95,14 @@ describe("debug export report", () => {
           observedAt: "2026-07-14T12:00:00.000Z"
         }
       },
-      sessionValues: {}
+      sessionValues: {
+        [REQUEST_LOG_SESSION_KEY]: [
+          Date.parse("2026-07-14T12:29:59.000Z"),
+          Date.parse("2026-07-14T12:30:01.000Z"),
+          Date.parse("2026-07-14T12:30:02.500Z"),
+          Date.parse("2026-07-14T12:34:00.000Z")
+        ]
+      }
     });
     const episode = episodeMetadata();
     const anime = animeMetadata();
@@ -120,7 +141,23 @@ describe("debug export report", () => {
         coveredThrough: new Date("2026-07-14T12:30:00.000Z"),
         complete: true
       },
-      historyParseIssues: []
+      historyParseIssues: [],
+      historyLoad: {
+        ...emptyHistoryLoadDiagnostics(),
+        source: "incremental",
+        cacheStatus: "loaded",
+        cachedEntryCount: 1,
+        end: "incremental-stop",
+        clickCount: 1,
+        rowsPerPage: [12, 30],
+        durationMilliseconds: 840,
+        incrementalStopFired: true,
+        retainedCachedEntryCount: 0,
+        refreshSkipped: null,
+        cacheWrite: "written"
+      },
+      metadataCollectionStartedAt: new Date("2026-07-14T12:30:00.000Z"),
+      metadataCollectionFinishedAt: new Date("2026-07-14T12:31:00.000Z")
     });
 
     expect(report.format).toBe(DEBUG_EXPORT_FORMAT);
@@ -129,15 +166,60 @@ describe("debug export report", () => {
     expect(report.analysisInput.anime[0]?.platformSnapshot.observedAt).toBe(
       "2026-07-14T12:00:00.000Z"
     );
+    expect(report.formatVersion).toBe(2);
     expect(report.diagnostics.metadata.policy).toEqual({
-      unavailableCacheTtlMilliseconds: 3_600_000,
+      parserVersion: 2,
+      unavailableCacheBaseTtlMilliseconds: 86_400_000,
+      unavailableCacheBackoffFactor: 4,
+      unavailableCacheMaxTtlMilliseconds: 604_800_000,
+      unavailableCacheJitterRatio: 0.2,
+      invalidResponseCacheTtlMilliseconds: 86_400_000,
       maxRequestStartsPerRollingSecond: 10
+    });
+    expect(report.diagnostics.metadata.collection).toEqual({
+      startedAt: "2026-07-14T12:30:00.000Z",
+      finishedAt: "2026-07-14T12:31:00.000Z",
+      networkRequests: {
+        scope: "extension-wide",
+        count: 2,
+        firstStartedAt: "2026-07-14T12:30:01.000Z",
+        lastStartedAt: "2026-07-14T12:30:02.500Z",
+        spanMilliseconds: 1_500
+      }
+    });
+    expect(report.diagnostics.history.load).toMatchObject({
+      source: "incremental",
+      clickCount: 1,
+      rowsPerPage: [12, 30],
+      durationMilliseconds: 840,
+      incrementalStopFired: true,
+      retainedCachedEntryCount: 0,
+      refreshSkipped: null
+    });
+    expect(report.diagnostics.history.policy).toEqual({
+      cacheRetentionDays: 400,
+      fullSyncIntervalMilliseconds: 604_800_000
     });
     expect(report.diagnostics.metadata.cacheEntries).toEqual(cacheSnapshot.cacheEntries);
     expect(JSON.parse(JSON.stringify(report))).toEqual(report);
     expect(debugExportFilename(generatedAt)).toBe(
       "ani-gamer-heatmap-debug-2026-07-14T12-34-56-789Z.json"
     );
+  });
+});
+
+describe("metadata request log", () => {
+  it("appends in order, restarts a malformed log, and keeps only the newest starts", () => {
+    expect(appendRequestLog(undefined, 10)).toEqual([10]);
+    expect(appendRequestLog([1, 2], 3)).toEqual([1, 2, 3]);
+    expect(appendRequestLog([5], 3)).toEqual([5, 5]);
+    expect(appendRequestLog([3, 1], 4)).toEqual([4]);
+    expect(appendRequestLog("bad", 4)).toEqual([4]);
+    const full = Array.from({ length: MAX_REQUEST_LOG_ENTRIES }, (_, index) => index);
+    const next = appendRequestLog(full, MAX_REQUEST_LOG_ENTRIES);
+    expect(next).toHaveLength(MAX_REQUEST_LOG_ENTRIES);
+    expect(next[0]).toBe(1);
+    expect(() => appendRequestLog([], Number.NaN)).toThrow();
   });
 });
 

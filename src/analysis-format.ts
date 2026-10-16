@@ -9,6 +9,22 @@ const dateFormatter = new Intl.DateTimeFormat("zh-TW", {
 
 const integerFormatter = new Intl.NumberFormat("zh-TW", { maximumFractionDigits: 0 });
 
+const snapshotTimeFormatter = new Intl.DateTimeFormat("zh-TW", {
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZone: "Asia/Taipei"
+});
+
+/**
+ * 觀看誌裡的紀錄狀態：顯示的是先前保存的快照時，附上它截至的時間，
+ * 讓「近 30 日」「過去一年」看得出是到哪一刻為止。
+ */
+export const formatHistoryNote = (note: string, savedSnapshotAt: Date | null): string =>
+  savedSnapshotAt ? `${note} · 紀錄截至 ${snapshotTimeFormatter.format(savedSnapshotAt)}` : note;
+
 export const formatInteger = (value: number): string => integerFormatter.format(value);
 
 export const formatDuration = (minutes: number): string => {
@@ -56,6 +72,12 @@ export const formatHalfOpenRange = (startInclusive: Date, endExclusive: Date): s
   const endInclusive = new Date(endExclusive.getTime() - 1);
   return `${formatTaipeiDate(startInclusive)}–${formatTaipeiDate(endInclusive)}`;
 };
+
+/** 時刻一律兩位數（02:00），區間用 en dash：章節、資料依據與海報寫法一致。 */
+export const formatClockHour = (hour: number): string => `${String(hour).padStart(2, "0")}:00`;
+
+export const formatHourRange = (startHour: number, endHour: number): string =>
+  `${formatClockHour(startHour)}–${formatClockHour(endHour)}`;
 
 const stripTrailingZero = (value: number): string => new Intl.NumberFormat("zh-TW", {
   maximumFractionDigits: 1

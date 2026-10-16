@@ -22,6 +22,8 @@ type HeatmapRenderState = {
   readonly loading?: boolean;
   readonly error?: string;
   readonly loadingMessage?: string;
+  /** A short non-blocking status shown beside the total, e.g. while saved history refreshes. */
+  readonly note?: string;
 };
 
 type HeatmapFocusSnapshot =
@@ -83,6 +85,8 @@ export class HeatmapView {
   render(entries: readonly WatchEntry[], mode: DayBoundaryMode, state: HeatmapRenderState = {}): void {
     const priorFocus = captureHeatmapFocus(this.#shadowRoot);
     const days = buildDailyWatches(entries, mode);
+    // 保存的紀錄可能是幾天前的快照：只數畫得出來的那一年，總數才會和格子、連續天數一致。
+    const shownCount = days.reduce((sum, day) => sum + day.entries.length, 0);
     const maxCount = Math.max(1, ...days.map((day) => day.entries.length));
     const longestStreak = getLongestWatchStreak(days);
     const weeks = chunkDaysByWeek(days);
@@ -100,8 +104,13 @@ export class HeatmapView {
       ? "正在整理觀看紀錄…"
       : state.error
         ? "讀取失敗"
-        : `過去一年共有 ${entries.length} 次觀看`;
+        : `過去一年共有 ${shownCount} 次觀看`;
     titleWrap.append(title, totalText);
+    if (state.note && !state.loading && !state.error) {
+      const note = element("span", "ani-heatmap-note");
+      note.textContent = state.note;
+      titleWrap.append(note);
+    }
 
     const actions = element("div", "ani-heatmap-actions");
     const analysisButton = this.renderAnalysisButton();
@@ -117,13 +126,13 @@ export class HeatmapView {
       renderLegend()
     );
 
-    const footer = element("div", entries.length === 0 && !state.loading ? "ani-heatmap-empty" : "ani-heatmap-footer");
+    const footer = element("div", shownCount === 0 && !state.loading ? "ani-heatmap-empty" : "ani-heatmap-footer");
     const modeLabel = mode === "thirty-hour" ? "30 小時制" : "24 小時制";
     footer.textContent = state.loading
       ? state.loadingMessage ?? "正在讀取頁面上的每集觀看時間。"
       : state.error
         ? state.error
-        : entries.length === 0
+        : shownCount === 0
           ? "這一年還沒有可辨識的觀看紀錄。若你曾觀看，請確認已登入後重新整理頁面。"
           : `${modeLabel} · 單日最多 ${maxCount} 次觀看 · 最長連續 ${longestStreak} 天`;
 
@@ -454,6 +463,7 @@ slot[name="ani-gamer-watch-focus-bridge"] {
 .ani-heatmap-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .ani-heatmap-title h2 { margin: 0; color: #111827; font-size: 16px; font-weight: 700; line-height: 1.4; }
 .ani-heatmap-total { color: #64748b; font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.ani-heatmap-note { color: #0369a1; background: rgba(14, 165, 233, 0.08); border-radius: 999px; padding: 1px 8px; font-size: 11px; line-height: 1.6; white-space: nowrap; }
 .ani-heatmap-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .ani-heatmap-analysis-button {
   height: 30px;

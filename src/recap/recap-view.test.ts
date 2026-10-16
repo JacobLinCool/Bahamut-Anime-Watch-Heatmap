@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { RecapPresentationDeck } from "./recap-deck";
 import {
   handleRecapStageNavigationKey,
+  recapAnnouncement,
   recapCss
 } from "./recap-view";
 
@@ -34,41 +36,81 @@ describe("recap playback keyboard isolation", () => {
   });
 });
 
-describe("recap mobile overflow contract", () => {
-  it("keeps chrome and actions fixed while only chapter content scrolls", () => {
+describe("recap theater layout contract", () => {
+  it("keeps chrome and controls fixed while only the current scene scrolls", () => {
+    expect(recapCss).toMatch(/\.ani-rc-theater\s*\{[^}]*position:\s*relative;[^}]*overflow:\s*hidden;/);
     expect(recapCss).toMatch(
-      /\.ani-recap-stage\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto;/
+      /\.ani-rc-theater\[data-layout="playback"\]\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;/
     );
     expect(recapCss).toMatch(
-      /\.ani-recap-chapter-content\s*\{[^}]*align-self:\s*stretch;[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/
+      /\.ani-rc-theater\[data-layout="playback"\] \.ani-rc-scene\s*\{[^}]*overflow-y:\s*auto;/
     );
-    expect(recapCss).toMatch(/\.ani-recap-intro, \.ani-recap-stage\s*\{[^}]*overflow:\s*hidden;/);
+    expect(recapCss).toMatch(/\.ani-rc-chrome, \.ani-rc-controls\s*\{[^}]*position:\s*absolute;/);
+    // 換場時新舊畫面疊在同一格，舊畫面不會把新畫面擠開。
+    expect(recapCss).toMatch(/\.ani-rc-scene\s*\{[^}]*grid-area:\s*1 \/ 1;/);
   });
 
-  it("uses vector CSS backdrops instead of stretching cover images", () => {
-    expect(recapCss).not.toContain(".ani-recap-backdrop img");
-    expect(recapCss).toMatch(/\.ani-recap-backdrop::before/);
+  it("paints backgrounds from vectors and a tiny canvas imprint, never from stretched cover images", () => {
+    // 背景層裡沒有 <img>：imprint 是畫在極小 canvas 上、低透明度的一抹色。
+    expect(recapCss).not.toMatch(/\.ani-rc-(?:field|imprint|grain|blob)[^{}]*\bimg\b/);
+    expect(recapCss).not.toContain(".ani-recap-backdrop");
+    const imprintOpacity = recapCss.match(/\.ani-rc-imprint-layer\[data-visible="true"\]\s*\{\s*opacity:\s*([\d.]+);/);
+    expect(imprintOpacity).not.toBeNull();
+    expect(Number(imprintOpacity?.[1])).toBeLessThanOrEqual(0.4);
+    // 大面積背景不做（動畫中的）模糊濾鏡：光暈只靠漸層與 transform。
+    expect(recapCss).not.toMatch(/\.ani-rc-(?:field|blob|imprint)[^{}]*\{[^}]*filter:\s*blur/);
+    // 資料依據的全螢幕幕會淡入：不帶 backdrop blur，免得每一格都重算模糊。
+    expect(recapCss).not.toMatch(/\.ani-recap-evidence-veil\s*\{[^}]*backdrop-filter/);
   });
 });
 
 describe("recap transition animation contract", () => {
-  it("never applies transition-only styles to the idle stage", () => {
-    expect(recapCss).not.toMatch(/\.ani-recap-stage\[data-transition\](?!\s*=)/);
-    expect(recapCss).toContain(
-      '.ani-recap-stage:is([data-transition="forward"], [data-transition="backward"])'
-    );
+  it("leaves choreography to the interruptible WAAPI choreographer, not CSS state attributes", () => {
+    expect(recapCss).not.toContain("[data-transition");
+    expect(recapCss).not.toMatch(/\.ani-recap-ghost(?!-button)/);
+    expect(recapCss).not.toContain("data-ghost");
+    // 只有常駐背景與 chrome 用 CSS transition；色調由註冊過的 custom property 內插。
+    expect(recapCss).toMatch(/\.ani-rc-field\s*\{[^}]*transition:\s*--ani-rc-base/);
   });
 });
 
 describe("recap marathon layout contract", () => {
-  it("stretches the supporting facts across the full visual column", () => {
-    expect(recapCss).toMatch(
-      /\.ani-recap-marathon-facts\s*\{[^}]*width:\s*100%;[^}]*margin-top:\s*0;/
-    );
-    expect(recapCss).toMatch(
-      /\.ani-recap-marathon-facts\s*>\s*\.ani-recap-outro-fact\s*\{[^}]*flex:\s*1 1 0;/
-    );
+  it("keeps marathon facts on their own grid instead of borrowing summary classes", () => {
+    expect(recapCss).toMatch(/\.ani-rc-marathon-facts\s*\{[^}]*display:\s*grid;/);
+    expect(recapCss).not.toContain("ani-recap-outro");
     expect(recapCss).not.toContain("ani-recap-summary--start");
+  });
+});
+
+describe("recap poster legibility", () => {
+  it("never sets a fixed font size below 11px anywhere in the recap", () => {
+    const sizes = [...recapCss.matchAll(/font-size:\s*([\d.]+)px/g)].map((match) => Number(match[1]));
+    expect(sizes.length).toBeGreaterThan(20);
+    expect(Math.min(...sizes)).toBeGreaterThanOrEqual(11);
+    const clampMinimums = [...recapCss.matchAll(/font-size:\s*clamp\(\s*([\d.]+)px/g)].map((match) => Number(match[1]));
+    expect(Math.min(...clampMinimums)).toBeGreaterThanOrEqual(11);
+  });
+
+  it("clamps long work titles on the poster to two lines", () => {
+    for (const selector of [".ani-rc-ledger-title", ".ani-rc-work-title", ".ani-rc-lead-title"]) {
+      expect(recapCss).toMatch(new RegExp(`${selector.replace(".", "\\.")}\\s*\\{[^}]*-webkit-line-clamp:\\s*2;`));
+    }
+  });
+});
+
+describe("recap announcements", () => {
+  it("announces the chapter number and title, and the summary title", () => {
+    const deck = {
+      fingerprint: "f",
+      scopeKey: "k",
+      chapters: [{ id: "overview", title: "總覽" }, { id: "taste", title: "口味" }],
+      summary: { title: "過去一年回顧" }
+    } as unknown as RecapPresentationDeck;
+    expect(recapAnnouncement({ kind: "recap-chapter", deck, chapterId: "taste", stale: false, direction: "forward" }))
+      .toBe("第 2 章：口味");
+    expect(recapAnnouncement({ kind: "recap-summary", deck, stale: false, direction: "forward" }))
+      .toBe("回顧總結：過去一年回顧");
+    expect(recapAnnouncement({ kind: "recap-intro" })).toBeNull();
   });
 });
 
@@ -84,10 +126,42 @@ describe("recap taste ranking alignment", () => {
 });
 
 describe("recap story title wrapping", () => {
+  it("breaks Chinese headlines only between phrases and shrinks headlines that run long", () => {
+    // keep-all 擋掉字與字之間的斷點，換行只發生在 recap-text 插入的 <wbr>。
+    expect(recapCss).toMatch(/\.ani-rc-title, \.ani-rc-intro-title, \.ani-rc-poster-title\s*\{[^}]*word-break:\s*keep-all;/);
+    expect(recapCss).toMatch(/\.ani-rc-nowrap\s*\{\s*white-space:\s*nowrap;/);
+    expect(recapCss).toMatch(/\.ani-rc-title\[data-fit="1"\]\s*\{[^}]*font-size:/);
+    expect(recapCss).toMatch(/\.ani-rc-title\[data-fit="2"\]\s*\{[^}]*font-size:/);
+    for (const selector of [".ani-rc-ledger-title", ".ani-rc-work-title", ".ani-rc-lead-title"]) {
+      expect(recapCss).toMatch(new RegExp(`${selector.replace(".", "\\.")}\\s*\\{[^}]*word-break:\\s*keep-all;`));
+    }
+  });
+
   it("keeps an emphasized phrase together when it fits on the next line", () => {
     expect(recapCss).toMatch(
       /\.ani-recap-title-em\s*\{[^}]*display:\s*inline-block;[^}]*max-inline-size:\s*100%;[^}]*text-wrap:\s*balance;/
     );
+  });
+});
+
+describe("recap forced-colors contract", () => {
+  it("gives every chart bar a system color, not only the peak", () => {
+    const forced = recapCss.slice(recapCss.indexOf("@media (forced-colors: active)")).replace(/\/\*[\s\S]*?\*\//g, "");
+    const base = forced.match(/([^{}]+)\{\s*background:\s*CanvasText;\s*\}/)?.[1] ?? "";
+    // 半透明的 color-mix 長條在強制色彩下會變成 Canvas：每一種長條都要列在這裡。
+    for (const bar of [
+      ".ani-rc-clock-bar",
+      ".ani-rc-mini-bar",
+      ".ani-rc-mini-bar[data-segment]",
+      ".ani-rc-rhythm-bar",
+      ".ani-rc-weekday-bar",
+      ".ani-rc-season-bar",
+      ".ani-rc-mini-season-bar"
+    ]) {
+      expect(base.split(",").map((selector) => selector.trim())).toContain(bar);
+    }
+    expect(forced).toMatch(/\.ani-rc-mini-season\[data-leading="true"\] \.ani-rc-mini-season-bar[^{]*\{\s*background:\s*Highlight;/);
+    expect(forced).toMatch(/\.ani-recap-primary-button\s*\{\s*border:\s*1px solid ButtonText;/);
   });
 });
 

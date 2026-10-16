@@ -8,7 +8,7 @@ import type {
   SeriesRuntimeRow,
   TimelinessRow
 } from "../analytics";
-import { formatInteger, formatPercent, truncateText } from "../analysis-format";
+import { formatClockHour, formatHourRange, formatInteger, formatPercent, truncateText } from "../analysis-format";
 import {
   analysisScopeKey,
   type AnalysisAxis,
@@ -16,11 +16,12 @@ import {
   type PeriodDefinition
 } from "../period";
 
+import type { RecapChapter, RecapDeck } from "./recap-state";
+import { buildRecapSummary, type RecapSummaryPayload } from "./recap-summary";
+
 /** Story titles weave work titles into sentences; clamp them so one runaway title can't take over the stage. */
 const STORY_TITLE_LIMIT = 20;
-import type { RecapChapter, RecapDeck } from "./recap-state";
-
-const RECAP_SCHEMA_VERSION = 4;
+const RECAP_SCHEMA_VERSION = 6;
 const MAX_RANKED_ROWS = 5;
 const SEASON_ORDER: readonly CalendarSeason[] = ["winter", "spring", "summer", "autumn"];
 
@@ -298,6 +299,8 @@ export type RecapPresentationDeck = RecapDeck<RecapPresentationChapter> & {
   readonly schemaVersion: typeof RECAP_SCHEMA_VERSION;
   readonly scope: RecapScopePresentation;
   readonly omissions: readonly RecapChapterOmission[];
+  /** 結尾海報：與章節同時凍結，fingerprint 一併涵蓋。 */
+  readonly summary: RecapSummaryPayload;
 };
 
 /**
@@ -329,11 +332,16 @@ export const buildRecapDeck = (result: AnalyticsResult): RecapPresentationDeck =
     startInclusiveIso: result.period.effectiveRange.startInclusive.toISOString(),
     endExclusiveIso: result.period.effectiveRange.endExclusive.toISOString()
   };
+  const summary = buildRecapSummary(result, chapters);
+  // 指紋只涵蓋畫面上看得到的內容。滾動期間的結束時間跟著資料時間逐分鐘前進（例如保存的紀錄
+  // 換成剛讀到的頁面），但只要標籤、範圍文字與各章內容沒變，播放中的回顧就不算過時。
+  const { startInclusiveIso: _start, endExclusiveIso: _end, ...visibleScope } = scope;
   const fingerprint = `recap-v${RECAP_SCHEMA_VERSION}:${sha256(stableStringify({
     schemaVersion: RECAP_SCHEMA_VERSION,
-    scope,
+    scope: visibleScope,
     chapters,
-    omissions
+    omissions,
+    summary
   }))}`;
   return deepFreeze({
     schemaVersion: RECAP_SCHEMA_VERSION,
@@ -341,7 +349,8 @@ export const buildRecapDeck = (result: AnalyticsResult): RecapPresentationDeck =
     scopeKey: result.period.key,
     scope,
     chapters,
-    omissions
+    omissions,
+    summary
   });
 };
 
@@ -360,7 +369,10 @@ const appendOverview = (
     kind: "overview",
     title: `${formatInteger(result.summary.watchCount)} 次播放，分布在 ${formatInteger(result.summary.activeDayCount)} ${activeDayLabel}`,
     eyebrow: result.period.label,
-    narrative: `你看了 ${formatInteger(result.summary.uniqueEpisodeCount)} 個不同單集，來自 ${formatInteger(result.summary.animeCount)} 部作品。`,
+    // 作品資料還沒到時無法辨識作品，不說「來自 0 部作品」。
+    narrative: result.summary.animeCount > 0
+      ? `你看了 ${formatInteger(result.summary.uniqueEpisodeCount)} 個不同單集，來自 ${formatInteger(result.summary.animeCount)} 部作品。`
+      : `你看了 ${formatInteger(result.summary.uniqueEpisodeCount)} 個不同單集。`,
     evidence: [
       textEvidence(
         "期間歸類",
@@ -421,8 +433,8 @@ const appendSeasonBreakdown = (
   const leadingRows = rows.filter((row) => row.watchCount === leader.watchCount);
   const leadingLabels = formatChineseList(leadingRows.map((row) => row.label));
   const title = leadingRows.length === 1
-    ? `你最常看${leadingLabels}上架的動畫`
-    : `${leadingLabels}並列你最常看的上架季`;
+    ? joinWithSpacing("你最常看", leadingLabels, "上架的動畫")
+    : joinWithSpacing(leadingLabels, "並列你最常看的上架季");
   chapters.push({
     id: "season-breakdown",
     kind: "season-breakdown",
@@ -465,12 +477,12 @@ const appendHabitClock = (
     kind: "habit-clock",
     title: SEGMENT_TITLES[top.key],
     eyebrow: "觀看時鐘",
-    narrative: `${formatPercent(top.share)} 的播放落在${top.label}（${top.startHour}:00–${top.endHour}:00），最常按下播放的是${clock.topWeekday.label}。`,
+    narrative: `${formatPercent(top.share)} 的播放落在${top.label}（${formatHourRange(top.startHour, top.endHour)}），最常按下播放的是${clock.topWeekday.label}。`,
     evidence: [
       textEvidence("統計方式", "以每一次播放的台北時間統計，深夜段跨越午夜。"),
       ...clock.segments.map((segment) =>
-        countEvidence(`${segment.label}（${segment.startHour}:00–${segment.endHour}:00）`, segment.watchCount, "watch")),
-      countEvidence(`高峰時刻 ${clock.peakHour}:00`, clock.peakHourCount, "watch"),
+        countEvidence(`${segment.label}（${formatHourRange(segment.startHour, segment.endHour)}）`, segment.watchCount, "watch")),
+      countEvidence(`高峰時刻 ${formatClockHour(clock.peakHour)}`, clock.peakHourCount, "watch"),
       countEvidence(`最常觀看的 ${clock.topWeekday.label}`, clock.topWeekday.watchCount, "watch")
     ],
     payload: {
@@ -914,9 +926,27 @@ const formatMinutes = (minutes: number): string => {
 const formatChineseList = (items: readonly string[]): string => {
   if (items.length === 0) return "";
   if (items.length === 1) return items[0] ?? "";
-  if (items.length === 2) return `${items[0]}與${items[1]}`;
-  return `${items.slice(0, -1).join("、")}與${items.at(-1)}`;
+  if (items.length === 2) return joinWithSpacing(items[0] ?? "", "與", items[1] ?? "");
+  return joinWithSpacing(items.slice(0, -1).join("、"), "與", items.at(-1) ?? "");
 };
+
+const ASCII_WORD_EDGE = /[0-9A-Za-z]/;
+const CJK_EDGE = /[\u3400-\u9fff\uf900-\ufaff]/;
+
+/**
+ * 串接文案片段；只在「中文字」與「英數」相鄰的接縫補一個半形空白，
+ * 例如「你最常看」+「2025 夏季」→「你最常看 2025 夏季」。標點旁不補。
+ */
+export const joinWithSpacing = (...segments: readonly string[]): string => segments
+  .filter((segment) => segment.length > 0)
+  .reduce((joined, segment) => {
+    if (joined.length === 0) return segment;
+    const left = joined.at(-1) ?? "";
+    const right = segment[0] ?? "";
+    const needsSpace = (ASCII_WORD_EDGE.test(left) && CJK_EDGE.test(right))
+      || (CJK_EDGE.test(left) && ASCII_WORD_EDGE.test(right));
+    return needsSpace ? `${joined} ${segment}` : `${joined}${segment}`;
+  }, "");
 
 const seasonIndex = (season: CalendarSeason): number => SEASON_ORDER.indexOf(season);
 

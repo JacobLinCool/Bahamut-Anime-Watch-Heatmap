@@ -530,6 +530,31 @@ describe("axis-specific active days and rhythm", () => {
     expect(result.rhythm.at(-1)?.label).toBe("2026-07-31");
   });
 
+  it("adds a seven-day rhythm for season scopes and folds the leftover days into the last week", () => {
+    const result = analyze({
+      entries: [
+        entry(1, "2026-07-20T10:00:00+08:00", "作品 A"),
+        entry(2, "2026-07-21T10:00:00+08:00", "作品 A"),
+        entry(3, "2026-10-02T10:00:00+08:00", "作品 B")
+      ],
+      episodeRecords: [
+        episode(1, 10, 0, "2026-07-02T23:59:00+08:00", 20),
+        episode(2, 10, 1, "2026-07-08T00:00:00+08:00", 24),
+        episode(3, 20, 0, "2026-09-30T08:00:00+08:00", 30)
+      ],
+      scope: releasedScope({ kind: "calendar-season", year: 2026, season: "summer" }),
+      asOf: instant("2026-10-31T23:59:00+08:00")
+    });
+
+    // 7/1–9/30 共 92 天：13 格，第 13 格吸收多出來的一天，不畫出只有一天的短柱。
+    expect(result.weeklyRhythm).toHaveLength(13);
+    expect(result.weeklyRhythm?.[0]).toEqual({ label: "2026-07-01", count: 1, contentMinutes: 20 });
+    expect(result.weeklyRhythm?.[1]).toEqual({ label: "2026-07-08", count: 1, contentMinutes: 24 });
+    expect(result.weeklyRhythm?.at(-1)).toMatchObject({ label: "2026-09-23", count: 1 });
+    // 儀表板用的月節奏不變。
+    expect(result.rhythm.map((point) => point.label)).toEqual(["2026-07", "2026-08", "2026-09"]);
+  });
+
   it("keeps a rolling 30-day release scope daily and includes every zero-value date", () => {
     const result = analyze({
       entries: [
@@ -1205,5 +1230,42 @@ describe("marathon", () => {
     });
     expect(result.marathon.peakDay).toMatchObject({ dateKey: "2026-07-03", watchCount: 2 });
     expect(result.marathon.topSingleDayRun).toBeNull();
+  });
+});
+
+describe("special episode numbers", () => {
+  const analyzeNumbers = (references: readonly EpisodeRef[]) => analyze({
+    entries: [
+      entry(1, "2026-07-11T10:00:00+08:00", "作品 A"),
+      entry(2, "2026-07-12T10:00:00+08:00", "作品 A"),
+      entry(9, "2026-07-12T10:30:00+08:00", "作品 B"),
+      entry(3, "2026-07-13T10:00:00+08:00", "作品 A")
+    ],
+    episodeRecords: [
+      ...references.map((reference, index): EpisodeMetadata => ({
+        ...episode(reference.videoSn, 10, index, `2026-07-0${index + 1}T08:00:00+08:00`, 30),
+        episodeNumber: reference.episodeNumber
+      })),
+      episode(9, 20, 0, "2026-07-01T08:00:00+08:00", 30)
+    ],
+    animeRecords: [animeRecord(10, references), animeRecord(20, [ref(9, 1)])]
+  });
+
+  it("verifies completion and preference for a group numbered exactly 1..totalEpisode", () => {
+    const result = analyzeNumbers([ref(1, 1), ref(2, 2), ref(3, 3)]);
+    expect(result.completion.rows.map((row) => row.animeSn)).toEqual([10, 20]);
+    expect(result.preference.coverage.passed).toBe(true);
+  });
+
+  it.each([
+    ["a prologue numbered 0", [ref(1, 0), ref(2, 1), ref(3, 2)]],
+    ["a special numbered 1.5", [ref(1, 1), ref(2, 1.5), ref(3, 2)]]
+  ] as const)("keeps release and duration facts but excludes structural results for %s", (_label, references) => {
+    const result = analyzeNumbers(references);
+    expect(result.summary).toMatchObject({ watchCount: 4, knownContentMinutes: 120, contentMinutes: 120 });
+    // The special group is excluded, never guessed; other anime keep their results.
+    expect(result.completion.rows.map((row) => row.animeSn)).toEqual([20]);
+    expect(result.preference.coverage.passed).toBe(false);
+    expect(result.preference.rows).toEqual([]);
   });
 });
