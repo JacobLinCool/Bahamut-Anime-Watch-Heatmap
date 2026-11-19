@@ -5,6 +5,7 @@ import {
   type HistoryLoadDiagnostics
 } from "./history-cache";
 import {
+  ANIME_METADATA_CACHE_TTL_MILLISECONDS,
   INVALID_RESPONSE_CACHE_TTL_MILLISECONDS,
   isMetadataV1CacheKey,
   serializeAnimeMetadata,
@@ -107,6 +108,7 @@ export type AniGamerDebugExport = {
       readonly collection: MetadataCollectionDiagnostics;
       readonly policy: {
         readonly parserVersion: number;
+        readonly animeCacheTtlMilliseconds: number;
         readonly unavailableCacheBaseTtlMilliseconds: number;
         readonly unavailableCacheBackoffFactor: number;
         readonly unavailableCacheMaxTtlMilliseconds: number;
@@ -316,6 +318,7 @@ export const buildDebugExport = (input: BuildDebugExportInput): AniGamerDebugExp
         ),
         policy: {
           parserVersion: METADATA_PARSER_VERSION,
+          animeCacheTtlMilliseconds: ANIME_METADATA_CACHE_TTL_MILLISECONDS,
           unavailableCacheBaseTtlMilliseconds: UNAVAILABLE_CACHE_BASE_TTL_MILLISECONDS,
           unavailableCacheBackoffFactor: UNAVAILABLE_CACHE_BACKOFF_FACTOR,
           unavailableCacheMaxTtlMilliseconds: UNAVAILABLE_CACHE_MAX_TTL_MILLISECONDS,

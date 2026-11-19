@@ -92,7 +92,7 @@ describe("recap poster legibility", () => {
   });
 
   it("clamps long work titles on the poster to two lines", () => {
-    for (const selector of [".ani-rc-ledger-title", ".ani-rc-work-title", ".ani-rc-lead-title"]) {
+    for (const selector of [".ani-rc-work-title", ".ani-rc-lead-title"]) {
       expect(recapCss).toMatch(new RegExp(`${selector.replace(".", "\\.")}\\s*\\{[^}]*-webkit-line-clamp:\\s*2;`));
     }
   });
@@ -132,7 +132,7 @@ describe("recap story title wrapping", () => {
     expect(recapCss).toMatch(/\.ani-rc-nowrap\s*\{\s*white-space:\s*nowrap;/);
     expect(recapCss).toMatch(/\.ani-rc-title\[data-fit="1"\]\s*\{[^}]*font-size:/);
     expect(recapCss).toMatch(/\.ani-rc-title\[data-fit="2"\]\s*\{[^}]*font-size:/);
-    for (const selector of [".ani-rc-ledger-title", ".ani-rc-work-title", ".ani-rc-lead-title"]) {
+    for (const selector of [".ani-rc-work-title", ".ani-rc-lead-title"]) {
       expect(recapCss).toMatch(new RegExp(`${selector.replace(".", "\\.")}\\s*\\{[^}]*word-break:\\s*keep-all;`));
     }
   });
@@ -153,7 +153,7 @@ describe("recap forced-colors contract", () => {
       ".ani-rc-clock-bar",
       ".ani-rc-mini-bar",
       ".ani-rc-mini-bar[data-segment]",
-      ".ani-rc-rhythm-bar",
+      ".ani-rc-cal-day[data-level]:not([data-level=\"0\"])",
       ".ani-rc-weekday-bar",
       ".ani-rc-season-bar",
       ".ani-rc-mini-season-bar"

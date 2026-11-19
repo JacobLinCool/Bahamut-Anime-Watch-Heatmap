@@ -10,13 +10,16 @@ import type {
   WatchEntry
 } from "./model";
 import {
+  CALENDAR_SEASONS,
   classifyReleaseAtTaipei,
   resolvePeriod,
   type AnalysisScope,
   type CalendarSeason,
   type ResolvedPeriod
 } from "./period";
-import { addTaipeiCalendarDays, taipeiWeekday, toTaipeiDateKey } from "./time";
+import { addTaipeiCalendarDays, taipeiStartOfDate, taipeiWeekday, toTaipeiDateKey } from "./time";
+import { buildBingeRows, singleSeasonReferences, type BingeRow } from "./binge";
+export type { BingeRow } from "./binge";
 
 const MIN_METADATA_COVERAGE = 0.9;
 const MIN_EXACT_COVERAGE = 1;
@@ -47,6 +50,12 @@ export type RhythmPoint = {
   readonly label: string;
   readonly count: number;
   readonly contentMinutes: number | null;
+};
+
+/** 期間內的一天：日期依分析軸與換日方式，沒看的日子 count 為 0。 */
+export type DailyCount = {
+  readonly dateKey: string;
+  readonly count: number;
 };
 
 export type WatchSummary = {
@@ -89,6 +98,77 @@ export type PreferenceRow = {
   readonly wilsonLower95: number;
   readonly distinctOpponentCount: number;
   readonly decisionBucketCount: number;
+};
+
+/** 一季裡有得選時最先看的幾部作品（依偏好排序）；這季還看不出來時 rows 為空。 */
+export type SeasonalFavorites = {
+  readonly year: number;
+  readonly season: CalendarSeason;
+  readonly choiceEventCount: number;
+  readonly rows: readonly PreferenceRow[];
+};
+
+/**
+ * 你特別偏心、但同季開播的作品裡人氣落在後段的作品。人氣是動畫瘋目前的累積人氣，
+ * 新番天生偏低、老番偏高，所以只和同一季開播、你在這段期間也看過的作品比。
+ */
+export type HiddenGemRow = {
+  readonly animeSn: number;
+  readonly title: string;
+  readonly coverUrl: string | null;
+  readonly cohortYear: number;
+  readonly cohortSeason: CalendarSeason;
+  /** 同季開播、你在這段期間也看過的作品數（含它自己）。 */
+  readonly cohortSize: number;
+  /** 在同季作品裡的人氣名次，1 為最熱門。 */
+  readonly popularityRank: number;
+  readonly cohortLeaderTitle: string;
+  /** 它的人氣 ÷ 同季最熱門作品的人氣。 */
+  readonly popularityRatio: number;
+};
+
+/** 一個觀看瞬間：哪部作品的哪一集，在什麼時候。 */
+export type WatchMoment = {
+  readonly animeSn: number | null;
+  readonly title: string;
+  readonly episode: string;
+  readonly coverUrl: string | null;
+  readonly watchedAt: Date;
+};
+
+/**
+ * 只對某些人成立的亮點：每一則都有自己的條件，不成立就是 null，不硬湊。
+ * 只在依觀看時間分析時計算；依上架時間時全部為 null。
+ */
+export type Highlights = {
+  /** 年度期間：跨進這一年的那一晚（前一年 12/31 22:00 到 1/1 03:00）有在看動畫。 */
+  readonly newYearsEve: {
+    readonly year: number;
+    /** 午夜前最後一集。 */
+    readonly before: WatchMoment | null;
+    /** 午夜後第一集。 */
+    readonly after: WatchMoment | null;
+  } | null;
+  /** 從凌晨三點前一路看到早上六點以後的一晚（每集間隔不超過一小時）；有好幾晚時取結束得最晚的。 */
+  readonly dawn: {
+    readonly startedAt: Date;
+    readonly endedAt: Date;
+    readonly episodeCount: number;
+    readonly last: WatchMoment;
+  } | null;
+  /** 開播兩年以上才看的作品；一部也沒有時為 null。 */
+  readonly oldWorks: {
+    readonly workCount: number;
+    readonly episodeCount: number;
+    /** 能判斷開播日的觀看集數，舊作比例的分母。 */
+    readonly datedEpisodeCount: number;
+    readonly oldest: {
+      readonly animeSn: number;
+      readonly title: string;
+      readonly coverUrl: string | null;
+      readonly premiereYear: number;
+    };
+  } | null;
 };
 
 export type SeriesRuntimeRow = {
@@ -158,6 +238,37 @@ export type CompletionRow = {
   readonly totalEpisode: number;
   /** History-window coverage, not proof of the user's lifetime completion state. */
   readonly ratio: number;
+  /** Still airing when fetched: totalEpisode counts aired episodes only, so a full ratio means caught up. */
+  readonly isOngoing: boolean;
+  /**
+   * 追番結果。已完結的作品只有在紀錄裡看得到第 1 集時才分看完以外的類別：
+   * 開頭不在紀錄裡（例如在紀錄保留期之前就開始看）的作品，說不出是放棄還是早就看過。
+   */
+  readonly outcome: CompletionOutcome;
+};
+
+export type CompletionOutcome =
+  /** 已完結，每一集都看了。 */
+  | "finished"
+  /** 已完結，只差最後一兩集，而且看了一半以上。 */
+  | "nearly"
+  /** 已完結，看了一半以上，但還差三集以上。 */
+  | "midway"
+  /** 已完結，看不到一半就停了。 */
+  | "dropped"
+  /** 已完結，但第 1 集不在紀錄裡。 */
+  | "unknown-start"
+  /** 還在播，看到最新一集。 */
+  | "caught-up"
+  /** 還在播，還沒追到最新一集。 */
+  | "behind";
+
+/** 某個類型裡，從第 1 集開始看、已完結的作品有幾部被放棄。 */
+export type DropTagRow = {
+  readonly label: string;
+  readonly startedCount: number;
+  readonly droppedCount: number;
+  readonly dropRate: number;
 };
 
 export type SeasonBreakdownRow = {
@@ -221,11 +332,8 @@ export type AnalyticsResult = {
   readonly historyComplete: boolean;
   readonly summary: WatchSummary;
   readonly rhythm: readonly RhythmPoint[];
-  /**
-   * 季度期間另外提供七天一格的節奏（label 為該週第一天）：月份只有三格、日又太多。
-   * 其他期間不提供；儀表板仍使用 rhythm。
-   */
-  readonly weeklyRhythm?: readonly RhythmPoint[];
+  /** 期間內每一天（含沒看的日子）：結尾海報的熱度圖逐日畫出整段期間。 */
+  readonly dailyCounts: readonly DailyCount[];
   readonly seasonBreakdown: readonly SeasonBreakdownRow[];
   readonly runtime: {
     readonly available: boolean;
@@ -255,6 +363,12 @@ export type AnalyticsResult = {
   readonly completion: {
     readonly available: boolean;
     readonly rows: readonly CompletionRow[];
+    /** 開始看的作品夠多的類型，放棄比例高的在前。 */
+    readonly dropTags: readonly DropTagRow[];
+  };
+  readonly binge: {
+    readonly available: boolean;
+    readonly rows: readonly BingeRow[];
   };
   readonly habitClock: HabitClock;
   readonly marathon: Marathon;
@@ -268,6 +382,13 @@ export type AnalyticsResult = {
     readonly coverage: CoverageResult;
     readonly choiceEventCount: number;
     readonly rows: readonly PreferenceRow[];
+  };
+  readonly highlights: Highlights;
+  readonly favorites: {
+    /** 年度期間：每一季（已開始的）各自的最愛；其他期間為空。 */
+    readonly seasons: readonly SeasonalFavorites[];
+    /** 最多兩部，最冷門的在前；沒有符合的作品時為空。 */
+    readonly hiddenGems: readonly HiddenGemRow[];
   };
 };
 
@@ -366,6 +487,7 @@ export const analyzeWatchHistory = ({
     historyComplete
   );
   const completionRows = buildCompletionRows(dataset);
+  const bingeRows = buildBingeRows(dataset);
   const timelinessRows = buildTimelinessRows(validReleaseWatches, dataset);
   const preference = buildPreferenceResult({
     dataset,
@@ -373,6 +495,10 @@ export const analyzeWatchHistory = ({
     asOf,
     historyComplete
   });
+  const seasonalFavorites = buildSeasonalFavorites({ entries, episodes, anime, historyCoverage, scope, asOf });
+  const favoriteRows = seasonalFavorites.length > 0
+    ? seasonalFavorites.flatMap((season) => season.rows)
+    : favoritePicks(preference.rows);
 
   return {
     scope,
@@ -396,7 +522,7 @@ export const analyzeWatchHistory = ({
       scheduleBoundaryIssueCount: dataset.selectedCanonical.filter(scheduleBoundaryMismatch).length
     },
     rhythm: buildRhythm(dataset),
-    ...(dataset.scope.period.kind === "calendar-season" ? { weeklyRhythm: buildWeeklyRhythm(dataset) } : {}),
+    dailyCounts: buildDailyCounts(dataset),
     seasonBreakdown: buildSeasonBreakdown(dataset, historyComplete),
     runtime,
     catalog,
@@ -404,8 +530,10 @@ export const analyzeWatchHistory = ({
     observedWatchedEpisodeReleaseFootprints,
     completion: {
       available: completionRows.length > 0,
-      rows: completionRows
+      rows: completionRows,
+      dropTags: buildDropTags(dataset, completionRows)
     },
+    binge: { available: bingeRows.length > 0, rows: bingeRows },
     habitClock: buildHabitClock(dataset),
     marathon: buildMarathon(dataset),
     timeliness: {
@@ -413,8 +541,283 @@ export const analyzeWatchHistory = ({
       coverage: releaseCoverage,
       rows: timelinessRows
     },
-    preference
+    preference,
+    highlights: buildHighlights(dataset, historyCoverage),
+    favorites: {
+      seasons: seasonalFavorites,
+      hiddenGems: buildHiddenGems(dataset, favoriteRows)
+    }
   };
+};
+
+/** 每集間隔超過這麼久，就算是另一次坐下來看。 */
+const SESSION_GAP_MINUTES = 60;
+/** 天亮了還在看：從這個時刻之前開始。 */
+const DAWN_STARTED_BY_HOUR = 3;
+/** 天亮了還在看：在這個區間結束。 */
+const DAWN_ENDS_FROM_HOUR = 6;
+const DAWN_ENDS_BEFORE_HOUR = 10;
+/** 跨年夜：午夜前後的這段時間。 */
+const NEW_YEARS_EVE_BEFORE_MINUTES = 2 * 60;
+const NEW_YEARS_EVE_AFTER_MINUTES = 3 * 60;
+/** 開播滿這麼多天才看，算舊作。 */
+const OLD_WORK_DAYS = 730;
+/** 一部作品的集數在這麼多天內一起上架，視為舊作整批上架，而不是正在播的新一季。 */
+const BATCH_UPLOAD_DAYS = 30;
+const MINUTES_PER_HOUR = 60;
+const TAIPEI_OFFSET_MINUTES = 8 * MINUTES_PER_HOUR;
+
+const NO_HIGHLIGHTS: Highlights = { newYearsEve: null, dawn: null, oldWorks: null };
+
+const buildHighlights = (dataset: AnalysisDataset, historyCoverage: HistoryCoverage): Highlights =>
+  dataset.scope.axis === "watched-at"
+    ? {
+        newYearsEve: buildNewYearsEve(dataset, historyCoverage),
+        dawn: buildDawn(dataset),
+        oldWorks: buildOldWorks(dataset)
+      }
+    : NO_HIGHLIGHTS;
+
+const watchMoment = (fact: WatchFact, dataset: AnalysisDataset): WatchMoment => ({
+  animeSn: fact.animeSn,
+  title: (fact.animeSn !== null ? dataset.titleByAnimeSn.get(fact.animeSn) : undefined) ?? fact.entry.title,
+  episode: fact.entry.episode,
+  coverUrl: fact.anime?.coverUrl ?? null,
+  watchedAt: new Date(fact.entry.watchedAt.getTime())
+});
+
+/** 台北時間的「一天中的第幾分鐘」。 */
+const taipeiMinuteOfDay = (minute: number): number =>
+  (((minute + TAIPEI_OFFSET_MINUTES) % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+
+/**
+ * 跨進這一年的那一晚屬於這一年的故事：30 小時制下它在統計上算前一年的最後一天，
+ * 但「看著動畫跨年」說的是這一年怎麼開始，所以從整段紀錄裡找，不受期間邊界影響。
+ */
+const buildNewYearsEve = (dataset: AnalysisDataset, historyCoverage: HistoryCoverage): Highlights["newYearsEve"] => {
+  if (dataset.scope.period.kind !== "calendar-year") return null;
+  const year = dataset.scope.period.year;
+  const midnightMinute = toEpochMinute(taipeiStartOfDate(`${String(year).padStart(4, "0")}-01-01`));
+  const fromMinute = midnightMinute - NEW_YEARS_EVE_BEFORE_MINUTES;
+  // 那一晚不在紀錄裡就不說：沒看到不代表沒在看。
+  if (!validDate(historyCoverage.coveredFrom) || toEpochMinute(historyCoverage.coveredFrom) > fromMinute) return null;
+  const night = dataset.events.filter((fact) =>
+    fact.watchedMinute >= fromMinute && fact.watchedMinute < midnightMinute + NEW_YEARS_EVE_AFTER_MINUTES);
+  if (night.length === 0) return null;
+  const before = night.filter((fact) => fact.watchedMinute < midnightMinute).at(-1);
+  const after = night.find((fact) => fact.watchedMinute >= midnightMinute);
+  return {
+    year,
+    before: before ? watchMoment(before, dataset) : null,
+    after: after ? watchMoment(after, dataset) : null
+  };
+};
+
+const buildDawn = (dataset: AnalysisDataset): Highlights["dawn"] => {
+  const facts = [...dataset.selectedEvents].sort((left, right) => left.watchedMinute - right.watchedMinute);
+  let best: { readonly session: readonly WatchFact[]; readonly endClock: number } | null = null;
+  let session: WatchFact[] = [];
+  const consider = (): void => {
+    const first = session[0];
+    const last = session.at(-1);
+    if (!first || !last) return;
+    const endClock = taipeiMinuteOfDay(last.watchedMinute);
+    if (endClock < DAWN_ENDS_FROM_HOUR * MINUTES_PER_HOUR || endClock >= DAWN_ENDS_BEFORE_HOUR * MINUTES_PER_HOUR) return;
+    // 同一個早上的三點：開始得比它早，才算一路看到天亮，而不是早起才看。
+    const morningThree = last.watchedMinute - endClock + DAWN_STARTED_BY_HOUR * MINUTES_PER_HOUR;
+    if (first.watchedMinute > morningThree) return;
+    if (!best || endClock > best.endClock || (endClock === best.endClock && session.length > best.session.length)) {
+      best = { session: [...session], endClock };
+    }
+  };
+  for (const fact of facts) {
+    const previous = session.at(-1);
+    if (previous && fact.watchedMinute - previous.watchedMinute > SESSION_GAP_MINUTES) {
+      consider();
+      session = [];
+    }
+    session.push(fact);
+  }
+  consider();
+  const picked = best as { readonly session: readonly WatchFact[]; readonly endClock: number } | null;
+  if (!picked) return null;
+  const first = picked.session[0]!;
+  const last = picked.session.at(-1)!;
+  return {
+    startedAt: new Date(first.entry.watchedAt.getTime()),
+    endedAt: new Date(last.entry.watchedAt.getTime()),
+    episodeCount: picked.session.length,
+    last: watchMoment(last, dataset)
+  };
+};
+
+const daysBetweenKeys = (fromKey: string, toKey: string): number =>
+  Math.round((Date.parse(`${toKey}T00:00:00Z`) - Date.parse(`${fromKey}T00:00:00Z`)) / 86_400_000);
+
+/**
+ * 舊作：開播滿兩年才看。同一個作品編號底下可能有好幾季，開播日停在第一季，所以還要看那一集
+ * 本身：上架也滿兩年，或整部作品的集數是一次整批上架（舊作重新上架），才算舊作；
+ * 否則多半是正在播的新一季。
+ */
+const buildOldWorks = (dataset: AnalysisDataset): Highlights["oldWorks"] => {
+  const uploads = new Map<number, { min: number; max: number }>();
+  for (const episode of dataset.episodes.values()) {
+    const minute = toEpochMinute(episode.availableFrom);
+    const span = uploads.get(episode.animeSn);
+    uploads.set(episode.animeSn, span
+      ? { min: Math.min(span.min, minute), max: Math.max(span.max, minute) }
+      : { min: minute, max: minute });
+  }
+  const oldAnime = new Map<number, { record: AnimeMetadata; premiere: string }>();
+  let episodeCount = 0;
+  let datedEpisodeCount = 0;
+  for (const fact of dataset.selectedEvents) {
+    const record = fact.anime;
+    const premiere = record?.seasonStartDateKey ?? null;
+    if (!record || fact.animeSn === null || premiere === null || !fact.episode) continue;
+    datedEpisodeCount += 1;
+    const watchedKey = toTaipeiDateKey(fact.entry.watchedAt);
+    if (daysBetweenKeys(premiere, watchedKey) < OLD_WORK_DAYS) continue;
+    const uploadedLongAgo = fact.watchedMinute - toEpochMinute(fact.episode.availableFrom) >= OLD_WORK_DAYS * MINUTES_PER_DAY;
+    const span = uploads.get(fact.animeSn);
+    const batchUpload = span !== undefined && span.max - span.min <= BATCH_UPLOAD_DAYS * MINUTES_PER_DAY;
+    if (!uploadedLongAgo && !batchUpload) continue;
+    episodeCount += 1;
+    oldAnime.set(fact.animeSn, { record, premiere });
+  }
+  const oldest = [...oldAnime].sort((left, right) =>
+    left[1].premiere.localeCompare(right[1].premiere) || left[0] - right[0])[0];
+  if (!oldest) return null;
+  const [animeSn, { record, premiere }] = oldest;
+  return {
+    workCount: oldAnime.size,
+    episodeCount,
+    datedEpisodeCount,
+    oldest: {
+      animeSn,
+      title: dataset.titleByAnimeSn.get(animeSn) ?? record.apiTitle,
+      coverUrl: record.coverUrl,
+      premiereYear: Number(premiere.slice(0, 4))
+    }
+  };
+};
+
+/** 每季列出幾部最愛。 */
+const FAVORITES_PER_SEASON = 3;
+/** 一季至少要有這麼多次「好幾部同時在等」的時刻，才說得出偏心誰。 */
+const MIN_SEASON_CHOICE_EVENTS = 8;
+/** 一部作品至少要在這麼多個時刻被拿來比過，而且至少一半的時候先被點開，才算得上最愛。 */
+const MIN_FAVORITE_DECISIONS = 3;
+const MIN_FAVORITE_WIN_RATE = 0.5;
+/** 私藏：同季開播、你也看過的作品至少要有這麼多部，人氣名次才有意義。 */
+const HIDDEN_GEM_MIN_COHORT = 8;
+/** 私藏：人氣名次落在同季作品的後三分之一。 */
+const HIDDEN_GEM_RANK_SHARE = 2 / 3;
+const MAX_HIDDEN_GEMS = 2;
+/** 開播日往後挪一週再判斷季別：提早幾天先播第一集的作品仍算下一季的新番。 */
+const PREMIERE_GRACE_DAYS = 7;
+
+const favoritePicks = (rows: readonly PreferenceRow[]): readonly PreferenceRow[] =>
+  rows.filter((row) => row.decisionBucketCount >= MIN_FAVORITE_DECISIONS && row.rawWinRate >= MIN_FAVORITE_WIN_RATE)
+    .slice(0, FAVORITES_PER_SEASON);
+
+/**
+ * 年度期間逐季重算「有得選時先看」：一部作品很少跨一整年播，整年的排行會被長青作品蓋過，
+ * 每季各自排才看得出那一季最期待哪幾部。還沒開始的季不列；已開始但時刻太少的季 rows 為空。
+ */
+const buildSeasonalFavorites = ({
+  entries,
+  episodes,
+  anime,
+  historyCoverage,
+  scope,
+  asOf
+}: {
+  readonly entries: readonly WatchEntry[];
+  readonly episodes: ReadonlyMap<number, EpisodeMetadata>;
+  readonly anime: ReadonlyMap<number, AnimeMetadata>;
+  readonly historyCoverage: HistoryCoverage;
+  readonly scope: AnalysisScope;
+  readonly asOf: Date;
+}): readonly SeasonalFavorites[] => {
+  if (scope.period.kind !== "calendar-year") return [];
+  const year = scope.period.year;
+  return CALENDAR_SEASONS.flatMap((season): SeasonalFavorites[] => {
+    const seasonScope: AnalysisScope = { ...scope, period: { kind: "calendar-season", year, season } };
+    let period: ResolvedPeriod;
+    try {
+      period = resolvePeriod(seasonScope, asOf);
+    } catch (error) {
+      if (error instanceof RangeError) return [];
+      throw error;
+    }
+    const dataset = buildAnalysisDataset({ entries, episodes, anime, scope: seasonScope, period, asOf });
+    const preference = buildPreferenceResult({
+      dataset,
+      historyCoverage,
+      asOf,
+      historyComplete: historyCoversScope(historyCoverage, period, asOf)
+    });
+    return [{
+      year,
+      season,
+      choiceEventCount: preference.choiceEventCount,
+      rows: preference.choiceEventCount >= MIN_SEASON_CHOICE_EVENTS ? favoritePicks(preference.rows) : []
+    }];
+  });
+};
+
+const premiereSeason = (seasonStartDateKey: string | null): { readonly year: number; readonly season: CalendarSeason } | null => {
+  if (seasonStartDateKey === null) return null;
+  const shifted = addTaipeiCalendarDays(seasonStartDateKey, PREMIERE_GRACE_DAYS);
+  const year = Number(shifted.slice(0, 4));
+  const month = Number(shifted.slice(5, 7));
+  return { year, season: CALENDAR_SEASONS[Math.floor((month - 1) / 3)]! };
+};
+
+const buildHiddenGems = (
+  dataset: AnalysisDataset,
+  favorites: readonly PreferenceRow[]
+): readonly HiddenGemRow[] => {
+  const watched = new Map<number, AnimeMetadata>();
+  for (const fact of dataset.selectedEvents) {
+    if (fact.animeSn !== null && fact.anime) watched.set(fact.animeSn, fact.anime);
+  }
+  const cohorts = new Map<string, AnimeMetadata[]>();
+  for (const record of watched.values()) {
+    const premiere = premiereSeason(record.seasonStartDateKey);
+    if (!premiere) continue;
+    const key = `${premiere.year}-${premiere.season}`;
+    cohorts.set(key, [...(cohorts.get(key) ?? []), record]);
+  }
+  const gems = new Map<number, HiddenGemRow>();
+  for (const favorite of favorites) {
+    const record = watched.get(favorite.animeSn);
+    // 還在播的作品人氣還在累積，名次不準。
+    if (!record || record.isOngoing || gems.has(favorite.animeSn)) continue;
+    const premiere = premiereSeason(record.seasonStartDateKey);
+    const cohort = premiere ? cohorts.get(`${premiere.year}-${premiere.season}`) ?? [] : [];
+    if (!premiere || cohort.length < HIDDEN_GEM_MIN_COHORT) continue;
+    const popular = record.platformSnapshot.popular;
+    const popularityRank = 1 + cohort.filter((other) => other.platformSnapshot.popular > popular).length;
+    if (popularityRank <= cohort.length * HIDDEN_GEM_RANK_SHARE) continue;
+    const leader = cohort.reduce((best, other) =>
+      other.platformSnapshot.popular > best.platformSnapshot.popular ? other : best);
+    gems.set(favorite.animeSn, {
+      animeSn: favorite.animeSn,
+      title: favorite.title,
+      coverUrl: favorite.coverUrl,
+      cohortYear: premiere.year,
+      cohortSeason: premiere.season,
+      cohortSize: cohort.length,
+      popularityRank,
+      cohortLeaderTitle: dataset.titleByAnimeSn.get(leader.animeSn) ?? leader.apiTitle,
+      popularityRatio: leader.platformSnapshot.popular > 0 ? popular / leader.platformSnapshot.popular : 1
+    });
+  }
+  return [...gems.values()]
+    .sort((left, right) => left.popularityRatio - right.popularityRatio || left.animeSn - right.animeSn)
+    .slice(0, MAX_HIDDEN_GEMS);
 };
 
 const buildRuntime = (
@@ -642,10 +1045,12 @@ const buildDimensionRows = (
       animeCount: value.animeSns.size,
       watchCount: value.watchCount,
       contentMinutes: value.knownContentMinutes
-    })).sort((left, right) => right.watchCount - left.watchCount
+    // 依作品數排：一部 24 集的作品不該比兩部 12 集的作品更代表你的口味。集數只用來分同數。
+    })).sort((left, right) => right.animeCount - left.animeCount
+      || right.watchCount - left.watchCount
       || right.contentMinutes - left.contentMinutes
       || left.label.localeCompare(right.label, "zh-Hant-TW")),
-    (left, right) => left.watchCount === right.watchCount
+    (left, right) => left.animeCount === right.animeCount && left.watchCount === right.watchCount
   );
 };
 
@@ -654,6 +1059,8 @@ const buildCompletionRows = (dataset: AnalysisDataset): readonly CompletionRow[]
   const watchedVideosByAnime = new Map<number, Set<number>>();
   for (const fact of dataset.canonical) {
     if (fact.animeSn === null) continue;
+    if (dataset.scope.axis === "watched-at"
+      && fact.entry.watchedAt >= dataset.period.effectiveRange.endExclusive) continue;
     const values = watchedVideosByAnime.get(fact.animeSn) ?? new Set<number>();
     values.add(fact.entry.videoSn);
     watchedVideosByAnime.set(fact.animeSn, values);
@@ -661,36 +1068,87 @@ const buildCompletionRows = (dataset: AnalysisDataset): readonly CompletionRow[]
 
   return [...selectedAnimeSns].flatMap((animeSn): CompletionRow[] => {
     const record = dataset.selectedEvents.find((fact) => fact.animeSn === animeSn)?.anime;
-    const verifiedRefs = record ? exactContiguousSingleGroupRefs(record) : null;
+    const verifiedRefs = record ? singleSeasonReferences(record) : null;
     if (!record || !verifiedRefs) {
       return [];
     }
     const episodeVideoSns = new Set(verifiedRefs.map((ref) => ref.videoSn));
-    const watchedEpisodeCount = [...(watchedVideosByAnime.get(animeSn) ?? [])]
-      .filter((videoSn) => episodeVideoSns.has(videoSn)).length;
+    const watched = watchedVideosByAnime.get(animeSn) ?? new Set<number>();
+    const watchedEpisodeCount = [...watched].filter((videoSn) => episodeVideoSns.has(videoSn)).length;
     if (watchedEpisodeCount > record.totalEpisode) {
       return [];
     }
+    const ratio = watchedEpisodeCount / record.totalEpisode;
     return [{
       animeSn,
       title: dataset.titleByAnimeSn.get(animeSn) ?? "",
       coverUrl: record.coverUrl,
       watchedEpisodeCount,
       totalEpisode: record.totalEpisode,
-      ratio: watchedEpisodeCount / record.totalEpisode
+      ratio,
+      isOngoing: record.isOngoing,
+      outcome: completionOutcome({
+        ratio,
+        remaining: record.totalEpisode - watchedEpisodeCount,
+        isOngoing: record.isOngoing,
+        sawFirstEpisode: watched.has(verifiedRefs[0]!.videoSn)
+      })
     }];
   }).sort((left, right) => right.ratio - left.ratio
     || right.watchedEpisodeCount - left.watchedEpisodeCount
     || left.animeSn - right.animeSn);
 };
 
-const exactContiguousSingleGroupRefs = (
-  anime: AnimeMetadata
-): AnimeMetadata["episodeRefs"] | null => {
-  const groupKeys = new Set(anime.episodeRefs.map((reference) => reference.groupKey));
-  if (groupKeys.size !== 1) return null;
-  const groupKey = groupKeys.values().next().value;
-  return typeof groupKey === "string" ? exactContiguousGroupRefs(anime, groupKey) : null;
+/** 只差這麼多集以內，算「差一點看完」。 */
+const NEARLY_MAX_REMAINING = 2;
+/** 看不到這個比例就停了，算「放棄」。 */
+const DROPPED_BELOW_RATIO = 0.5;
+/** 一個類型至少要有這麼多部從頭開始看的已完結作品，放棄比例才有意義。 */
+const DROP_TAG_MIN_STARTED = 8;
+
+const completionOutcome = ({
+  ratio,
+  remaining,
+  isOngoing,
+  sawFirstEpisode
+}: {
+  readonly ratio: number;
+  readonly remaining: number;
+  readonly isOngoing: boolean;
+  readonly sawFirstEpisode: boolean;
+}): CompletionOutcome => {
+  if (isOngoing) return ratio >= 1 ? "caught-up" : "behind";
+  if (ratio >= 1) return "finished";
+  if (!sawFirstEpisode) return "unknown-start";
+  if (ratio < DROPPED_BELOW_RATIO) return "dropped";
+  return remaining <= NEARLY_MAX_REMAINING ? "nearly" : "midway";
+};
+
+const STARTED_OUTCOMES: ReadonlySet<CompletionOutcome> = new Set(["finished", "nearly", "midway", "dropped"]);
+
+const buildDropTags = (dataset: AnalysisDataset, rows: readonly CompletionRow[]): readonly DropTagRow[] => {
+  const tagsByAnime = new Map<number, readonly string[]>();
+  for (const fact of dataset.selectedEvents) {
+    if (fact.animeSn !== null && fact.anime) tagsByAnime.set(fact.animeSn, fact.anime.tags);
+  }
+  const stats = new Map<string, { startedCount: number; droppedCount: number }>();
+  for (const row of rows) {
+    if (!STARTED_OUTCOMES.has(row.outcome)) continue;
+    for (const rawTag of new Set(tagsByAnime.get(row.animeSn) ?? [])) {
+      const label = rawTag.trim();
+      if (!label) continue;
+      const value = stats.get(label) ?? { startedCount: 0, droppedCount: 0 };
+      value.startedCount += 1;
+      if (row.outcome === "dropped") value.droppedCount += 1;
+      stats.set(label, value);
+    }
+  }
+  return [...stats]
+    .filter(([, value]) => value.startedCount >= DROP_TAG_MIN_STARTED)
+    .map(([label, value]) => ({ label, ...value, dropRate: value.droppedCount / value.startedCount }))
+    .sort((left, right) => right.dropRate - left.dropRate
+      || right.startedCount - left.startedCount
+      || left.label.localeCompare(right.label, "zh-Hant-TW"));
 };
 
 const exactContiguousGroupRefs = (
@@ -1348,36 +1806,18 @@ const buildRhythm = (dataset: AnalysisDataset): readonly RhythmPoint[] => {
   });
 };
 
-/** 從期間第一天起每七天一格；最後不足一週的零頭併入前一格，不畫出一根誤導的短柱。 */
-const buildWeeklyRhythm = (dataset: AnalysisDataset): readonly RhythmPoint[] => {
+const buildDailyCounts = (dataset: AnalysisDataset): readonly DailyCount[] => {
   const mode = dataset.scope.axis === "watched-at" ? dataset.scope.dayBoundaryMode : "calendar";
   const start = toTaipeiDateKey(dataset.period.effectiveRange.startInclusive, mode);
   const end = toTaipeiDateKey(new Date(dataset.period.effectiveRange.endExclusive.getTime() - 1), mode);
-  const dayIndex = new Map<string, number>();
-  let days = 0;
-  for (let key = start; key <= end; key = addTaipeiCalendarDays(key, 1)) dayIndex.set(key, days++);
-  const binCount = Math.max(1, Math.floor(days / 7));
-  const bins = Array.from({ length: binCount }, (_, index) => ({
-    label: addTaipeiCalendarDays(start, index * 7),
-    count: 0,
-    knownMinutes: 0,
-    knownDurations: 0
-  }));
+  const counts = new Map<string, number>();
+  for (let key = start; key <= end; key = addTaipeiCalendarDays(key, 1)) counts.set(key, 0);
   for (const fact of dataset.selectedEvents) {
-    const index = dayIndex.get(axisDateKey(fact, dataset.scope));
-    if (index === undefined) continue;
-    const bin = bins[Math.min(binCount - 1, Math.floor(index / 7))]!;
-    bin.count += 1;
-    if (validDuration(fact.episode)) {
-      bin.knownMinutes += fact.episode.durationMinutes;
-      bin.knownDurations += 1;
-    }
+    const key = axisDateKey(fact, dataset.scope);
+    const count = counts.get(key);
+    if (count !== undefined) counts.set(key, count + 1);
   }
-  return bins.map((bin) => ({
-    label: bin.label,
-    count: bin.count,
-    contentMinutes: bin.knownDurations > 0 || bin.count === 0 ? bin.knownMinutes : null
-  }));
+  return [...counts].map(([dateKey, count]) => ({ dateKey, count }));
 };
 
 const axisDateKey = (fact: WatchFact, scope: AnalysisScope): string => {

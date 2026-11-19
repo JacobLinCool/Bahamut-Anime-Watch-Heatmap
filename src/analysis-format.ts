@@ -47,6 +47,26 @@ export const formatCompactDuration = (minutes: number): string => {
   return `${formatInteger(hours)} 小時 ${remainder} 分`;
 };
 
+/** Elapsed time between watch records, rather than the sum of episode lengths. */
+export const formatBingeElapsed = (minutes: number): string => {
+  if (!Number.isFinite(minutes) || minutes < 0) throw new RangeError("minutes 必須是非負數");
+  const rounded = Math.round(minutes);
+  const days = Math.floor(rounded / (24 * 60));
+  const hours = Math.floor((rounded % (24 * 60)) / 60);
+  const remainder = rounded % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${formatInteger(days)} 天`);
+  if (hours > 0) parts.push(`${hours} 小時`);
+  if (remainder > 0 || parts.length === 0) parts.push(`${remainder} 分鐘`);
+  return parts.join(" ");
+};
+
+export const formatEpisodesPerDay = (rate: number): string => {
+  if (!Number.isFinite(rate) || rate < 0) throw new RangeError("rate 必須是非負數");
+  if (rate > 0 && rate < 0.1) return "不到 0.1 集／日";
+  return `${stripTrailingZero(rate)} 集／日`;
+};
+
 export const formatLag = (minutes: number): string => {
   if (!Number.isFinite(minutes) || minutes < 0) throw new RangeError("lag 必須是非負數");
   if (minutes < 60) return `${Math.round(minutes)} 分鐘`;

@@ -177,7 +177,7 @@ const chapterCss = `
 /* 接力封面的殘影：上一章的封面疊在新框裡淡出。 */
 .ani-rc-baton-ghost { position: absolute; z-index: 1; inset: 0; pointer-events: none; }
 .ani-rc-lead-art { display: grid; place-items: center; width: 100%; height: 100%; overflow: hidden; border-radius: 14px; background: var(--rc-surface-strong); box-shadow: 0 24px 54px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .08); }
-.ani-rc-lead-art img, .ani-rc-row-cover img, .ani-rc-collage-art img, .ani-rc-ledger-cover img, .ani-rc-work-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ani-rc-lead-art img, .ani-rc-row-cover img, .ani-rc-collage-art img, .ani-rc-work-cover img { width: 100%; height: 100%; object-fit: cover; }
 .ani-rc-lead-copy { display: grid; gap: 6px; min-width: 0; }
 .ani-rc-lead-label { color: var(--rc-accent); font-size: 11px; font-weight: 900; letter-spacing: .16em; }
 .ani-rc-lead-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--rc-ink); font-size: clamp(18px, 1.6vw, 23px); font-weight: 800; line-height: 1.3; word-break: keep-all; overflow-wrap: anywhere; }
@@ -243,6 +243,32 @@ const chapterCss = `
 .ani-recap-taste-column li { display: grid; grid-template-rows: auto 7px; min-width: 0; }
 .ani-recap-taste-column li .ani-recap-meter { align-self: end; height: 3px; margin-top: 0; max-width: none; }
 .ani-recap-taste-column { min-width: 0; }
+.ani-rc-outcomes { display: grid; gap: 12px; min-width: 0; }
+.ani-rc-outcome-bar { display: flex; gap: 3px; height: 14px; overflow: hidden; border-radius: 999px; }
+.ani-rc-outcome-segment { flex: 1 1 0; min-width: 4px; }
+.ani-rc-outcome-legend { display: grid; grid-template-columns: repeat(4, max-content); gap: 8px 22px; margin: 0; padding: 0; list-style: none; }
+.ani-rc-outcome { display: grid; grid-template-columns: 10px auto auto; align-items: center; gap: 8px; color: var(--rc-ink-2); font-size: 14px; white-space: nowrap; }
+.ani-rc-outcome-swatch { width: 10px; height: 10px; border-radius: 3px; }
+.ani-rc-outcome-count { color: var(--rc-ink); font-weight: 800; font-variant-numeric: tabular-nums; }
+.ani-rc-outcome-segment[data-outcome="finished"], .ani-rc-outcome[data-outcome="finished"] .ani-rc-outcome-swatch { background: var(--rc-accent); }
+.ani-rc-outcome-segment[data-outcome="nearly"], .ani-rc-outcome[data-outcome="nearly"] .ani-rc-outcome-swatch { background: color-mix(in srgb, var(--rc-accent) 62%, rgba(148, 170, 220, .3)); }
+.ani-rc-outcome-segment[data-outcome="midway"], .ani-rc-outcome[data-outcome="midway"] .ani-rc-outcome-swatch { background: color-mix(in srgb, var(--rc-accent) 32%, rgba(148, 170, 220, .26)); }
+.ani-rc-outcome-segment[data-outcome="dropped"], .ani-rc-outcome[data-outcome="dropped"] .ani-rc-outcome-swatch { background: rgba(148, 170, 220, .2); }
+.ani-rc-tile .ani-rc-outcomes { gap: 8px; }
+.ani-rc-tile .ani-rc-outcome-bar { height: 9px; }
+.ani-rc-tile .ani-rc-outcome-legend { grid-template-columns: repeat(2, minmax(0, max-content)); gap: 5px 18px; }
+.ani-rc-tile .ani-rc-outcome { font-size: 12px; }
+.ani-rc-tile[data-h="1"] .ani-rc-outcome-legend { display: none; }
+.ani-rc-season-picks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 36px; }
+.ani-rc-season-pick { display: grid; align-content: start; gap: 10px; min-width: 0; }
+.ani-rc-season-pick-name { margin: 0; padding-bottom: 8px; border-bottom: 1px solid var(--rc-line); color: var(--rc-accent); font-size: 12px; font-weight: 900; letter-spacing: .16em; }
+.ani-rc-season-pick-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ani-rc-season-pick-item { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 12px; min-width: 0; }
+.ani-rc-season-pick-cover { display: grid; place-items: center; overflow: hidden; width: 100%; aspect-ratio: 3 / 4; border-radius: 6px; background: var(--rc-surface-strong); box-shadow: 0 6px 16px rgba(0, 0, 0, .35); }
+.ani-rc-season-pick-cover img, .ani-rc-fav-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ani-rc-season-pick-title { overflow: hidden; color: var(--rc-ink); font-size: 14px; font-weight: 800; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.ani-rc-season-pick-item:first-child .ani-rc-season-pick-title { font-size: 15px; }
+.ani-rc-season-pick-empty { margin: 0; color: var(--rc-ink-3); font-size: 13px; }
 .ani-recap-taste-line { display: flex; justify-content: space-between; gap: 10px; min-width: 0; color: var(--rc-ink-2); font-size: 13.5px; }
 .ani-recap-taste-line span { min-width: 0; overflow: hidden; color: var(--rc-ink); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .ani-recap-taste-line strong { flex: none; color: var(--rc-ink-3); font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -265,13 +291,16 @@ const evidenceCss = `
 
 /* 結尾海報：一張 12×4 的 bento，每塊磚帶著它那一章的顏色；全部塞進一個桌機畫面。 */
 const posterCss = `
+/* 海報在大螢幕上整張等比放大（見 recap-poster 的 fitPoster）：放大時 --rc-vh／--rc-vw 固定在
+   設計基準（1440×900 視窗）的值，視窗單位才不會被 zoom 再乘一次。 */
+.ani-rc-summary[data-rc-zoomed="true"] { align-content: center; }
 .ani-rc-summary { display: grid; padding: calc(var(--rc-top-inset) + 12px) var(--rc-poster-gutter) 20px; }
 .ani-rc-poster { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 12px; width: min(100%, var(--rc-poster-width)); height: 100%; min-height: 600px; margin-inline: auto; }
 .ani-rc-poster-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 24px; min-width: 0; }
 .ani-rc-poster-titles { display: grid; gap: 2px; min-width: 0; }
 .ani-rc-poster-eyebrow { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; color: var(--rc-ink-3); font-size: 12px; font-weight: 800; letter-spacing: .14em; }
 .ani-rc-poster-range { font-variant-numeric: tabular-nums; letter-spacing: .04em; }
-.ani-rc-poster-title { margin: 0; font-size: clamp(28px, 4.4vh, 42px); letter-spacing: -.02em; line-height: 1.12; white-space: nowrap; }
+.ani-rc-poster-title { margin: 0; font-size: clamp(28px, calc(4.4 * var(--rc-vh, 1vh)), 42px); letter-spacing: -.02em; line-height: 1.12; white-space: nowrap; }
 .ani-rc-poster-stale { grid-column: 1 / -1; margin: 0; color: #fcd34d; font-size: 12px; font-weight: 800; }
 .ani-rc-poster-stale[hidden] { display: none; }
 /* 磚與型態框都是一般容器（內容照常被報讀），導覽交給一顆蓋滿整塊的按鈕。 */
@@ -282,24 +311,35 @@ const posterCss = `
 .ani-rc-persona:hover { border-color: color-mix(in srgb, var(--rc-accent) 70%, transparent); background: linear-gradient(120deg, color-mix(in srgb, var(--rc-accent) 22%, transparent), rgba(146, 172, 228, .06)); }
 .ani-rc-persona-name-row { display: flex; align-items: center; gap: 12px; min-width: 0; margin: 0; }
 .ani-rc-persona-label { color: var(--rc-ink-3); font-size: 11px; font-weight: 800; letter-spacing: .16em; white-space: nowrap; }
-.ani-rc-persona-name { color: var(--rc-accent); font-size: clamp(20px, 3vh, 26px); font-weight: 900; letter-spacing: .02em; line-height: 1.15; white-space: nowrap; }
+.ani-rc-persona-name { color: var(--rc-accent); font-size: clamp(20px, calc(3 * var(--rc-vh, 1vh)), 26px); font-weight: 900; letter-spacing: .02em; line-height: 1.15; white-space: nowrap; }
 .ani-rc-persona-reason { overflow: hidden; margin: 0; color: var(--rc-ink-2); font-size: 12.5px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .ani-rc-persona-others { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: 4px; overflow: hidden; color: var(--rc-ink-3); font-size: 11px; font-weight: 700; white-space: nowrap; }
 .ani-rc-persona-chip { border: 1px solid color-mix(in srgb, var(--rc-accent) 46%, transparent); border-radius: 999px; color: var(--rc-accent); font-weight: 800; padding: 1px 9px; }
 .ani-rc-poster-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .ani-rc-poster-actions :is(.ani-recap-primary-button, .ani-recap-ghost-button) { min-height: 40px; padding: 8px 18px; }
 .ani-rc-poster-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 12px; min-height: 0; }
-.ani-rc-tile { position: relative; isolation: isolate; container-type: size; display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow: hidden; border-radius: 18px; color: var(--rc-ink); line-height: 1.4; padding: clamp(12px, 1.7vh, 16px) clamp(14px, 1.2vw, 18px); transition: translate 220ms var(--ani-ease); }
+.ani-rc-tile { position: relative; isolation: isolate; container-type: size; display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow: hidden; border-radius: 18px; color: var(--rc-ink); line-height: 1.4; padding: clamp(12px, calc(1.7 * var(--rc-vh, 1vh)), 16px) clamp(14px, calc(1.2 * var(--rc-vw, 1vw)), 18px); transition: translate 220ms var(--ani-ease); }
 .ani-rc-tile:has(> .ani-rc-stretch):hover { translate: 0 -2px; }
 .ani-rc-tile ul { margin: 0; padding: 0; list-style: none; }
 .ani-rc-tile-surface { position: absolute; z-index: -1; inset: 0; border: 1px solid color-mix(in oklab, var(--rc-accent) 24%, rgba(148, 170, 220, .14)); border-radius: inherit; background: linear-gradient(155deg, color-mix(in oklab, var(--rc-accent) 16%, transparent) 0%, rgba(146, 172, 228, .045) 58%, rgba(146, 172, 228, .03) 100%); transition: border-color 220ms var(--ani-ease), background 220ms var(--ani-ease); }
 .ani-rc-tile:has(> .ani-rc-stretch):hover .ani-rc-tile-surface { border-color: color-mix(in oklab, var(--rc-accent) 52%, transparent); background: linear-gradient(155deg, color-mix(in oklab, var(--rc-accent) 24%, transparent) 0%, rgba(146, 172, 228, .06) 60%, rgba(146, 172, 228, .04) 100%); }
 .ani-rc-tile-label { flex: none; overflow: hidden; margin: 0; color: var(--rc-accent); font-size: 11.5px; font-weight: 900; letter-spacing: .14em; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .ani-rc-tile-head { display: grid; gap: 3px; min-width: 0; }
-.ani-rc-tile-value { display: flex; flex-wrap: wrap; align-items: baseline; color: var(--rc-ink); font-size: clamp(25px, 4.1vh, 38px); font-weight: 900; line-height: 1.04; letter-spacing: -.03em; }
+.ani-rc-tile-value { display: flex; flex-wrap: wrap; align-items: baseline; color: var(--rc-ink); font-size: clamp(25px, calc(4.1 * var(--rc-vh, 1vh)), 38px); font-weight: 900; line-height: 1.04; letter-spacing: -.03em; }
 .ani-rc-tile-value .ani-rc-unit { color: color-mix(in srgb, var(--rc-accent) 82%, #ffffff); font-size: .46em; }
 .ani-rc-tile-word { letter-spacing: .02em; }
 .ani-rc-tile-caption { overflow: hidden; color: var(--rc-ink-3); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.ani-rc-fav-board { display: grid; flex: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 10px 14px; min-height: 0; }
+.ani-rc-fav-board[data-layout="row"] { grid-template-columns: repeat(var(--rc-seasons, 4), minmax(0, 1fr)); }
+.ani-rc-fav-season { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 4px; min-width: 0; min-height: 0; }
+.ani-rc-fav-season-name { color: var(--rc-ink-3); font-size: 11.5px; font-weight: 800; letter-spacing: .08em; }
+.ani-rc-fav-covers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); justify-content: start; gap: 6px; height: 100%; min-height: 0; margin: 0; padding: 0; list-style: none; }
+.ani-rc-fav-item { position: relative; display: grid; align-items: start; min-width: 0; min-height: 0; }
+.ani-rc-fav-cover { display: grid; place-items: center; overflow: hidden; width: 100%; max-height: 100%; aspect-ratio: 3 / 4; border-radius: 6px; background: var(--rc-surface-strong); box-shadow: 0 6px 14px rgba(0, 0, 0, .35); }
+.ani-rc-fav-item[data-gem="true"] .ani-rc-fav-cover { outline: 2px solid var(--rc-accent); outline-offset: 1px; }
+.ani-rc-fav-gem { position: absolute; bottom: 3px; left: 50%; translate: -50% 0; border-radius: 999px; background: var(--rc-accent); color: #0b0f1a; font-size: 11px; font-weight: 900; line-height: 16px; padding: 0 6px; white-space: nowrap; }
+.ani-rc-fav-title { overflow: hidden; color: var(--rc-ink-2); font-size: 12px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.ani-rc-fav-empty { align-self: center; color: var(--rc-ink-3); font-size: 12px; }
 .ani-rc-tile-foot { flex: none; margin-top: auto; overflow: hidden; color: var(--rc-ink-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .ani-rc-tile-pair { display: flex; flex-wrap: wrap; gap: 6px 30px; }
 .ani-rc-tile-meter .ani-rc-meter { max-width: none; margin-top: 2px; }
@@ -310,47 +350,63 @@ const posterCss = `
 .ani-rc-tile-segment[data-top="true"] strong { color: var(--rc-accent); }
 /* 英雄磚：封面拼貼（或期間）+ 最大的數字 + 觀看日占比 + KPI，上下平均分配，不留空帶。 */
 /* 拼貼的封面會從上一章的位置飛進來：英雄磚不裁切、疊在其他磚上面，飛行途中不會被磚緣切掉。 */
-.ani-rc-tile[data-tile="hero"] { z-index: 1; overflow: visible; justify-content: space-between; gap: clamp(8px, 1.4vh, 12px); padding: clamp(14px, 2.2vh, 22px) clamp(16px, 1.5vw, 24px); }
-.ani-rc-collage { position: relative; flex: none; height: calc(var(--rc-cover-w) * 4 / 3 + 12px); margin-top: 2px; --rc-cover-w: clamp(70px, 11.5vh, 112px); }
+.ani-rc-tile[data-tile="hero"] { z-index: 1; overflow: visible; justify-content: space-between; gap: clamp(8px, calc(1.4 * var(--rc-vh, 1vh)), 12px); padding: clamp(14px, calc(2.2 * var(--rc-vh, 1vh)), 22px) clamp(16px, calc(1.5 * var(--rc-vw, 1vw)), 24px); }
+.ani-rc-collage { position: relative; flex: none; height: calc(var(--rc-cover-w) * 4 / 3 + 12px); margin-top: 2px; --rc-cover-w: clamp(70px, calc(11.5 * var(--rc-vh, 1vh)), 112px); }
 .ani-rc-collage-item { position: absolute; top: calc(mod(var(--rc-i, 0), 2) * 12px); left: calc(var(--rc-i, 0) * (100% - var(--rc-cover-w)) / max(1, var(--rc-n, 1) - 1)); z-index: calc(20 - var(--rc-i, 0)); width: var(--rc-cover-w); aspect-ratio: 3 / 4; }
 .ani-rc-collage-art { display: grid; place-items: center; width: 100%; height: 100%; overflow: hidden; border-radius: 12px; background: var(--rc-surface-strong); box-shadow: 0 16px 34px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .1); rotate: calc((var(--rc-i, 0) - (var(--rc-n, 1) - 1) / 2) * 2.5deg); }
 .ani-rc-hero-period { display: grid; gap: 4px; flex: none; }
-.ani-rc-hero-period-range { color: var(--rc-ink); font-size: clamp(18px, 2.7vh, 24px); font-weight: 900; letter-spacing: .01em; font-variant-numeric: tabular-nums; }
+.ani-rc-hero-period-range { color: var(--rc-ink); font-size: clamp(18px, calc(2.7 * var(--rc-vh, 1vh)), 24px); font-weight: 900; letter-spacing: .01em; font-variant-numeric: tabular-nums; }
 .ani-rc-hero-period-days { color: var(--rc-ink-3); font-size: 12px; font-weight: 700; letter-spacing: .1em; }
 .ani-rc-hero-number { display: grid; gap: 6px; min-width: 0; }
-.ani-rc-hero-figure { display: flex; flex-wrap: wrap; align-items: baseline; color: var(--rc-accent); font-size: clamp(64px, 12vh, 118px); font-weight: 900; line-height: 1.04; letter-spacing: -.045em; padding-bottom: .04em; text-shadow: 0 0 44px color-mix(in srgb, var(--rc-accent) 30%, transparent); }
-.ani-rc-hero-figure[data-long="true"] { font-size: clamp(50px, 8.6vh, 84px); }
+.ani-rc-hero-figure { display: flex; flex-wrap: wrap; align-items: baseline; color: var(--rc-accent); font-size: clamp(64px, calc(12 * var(--rc-vh, 1vh)), 118px); font-weight: 900; line-height: 1.04; letter-spacing: -.045em; padding-bottom: .04em; text-shadow: 0 0 44px color-mix(in srgb, var(--rc-accent) 30%, transparent); }
+.ani-rc-hero-figure[data-long="true"] { font-size: clamp(50px, calc(8.6 * var(--rc-vh, 1vh)), 84px); }
 /* 沒有拼貼時數字就是整塊磚的主角：再放大一級。 */
-.ani-rc-tile[data-tile="hero"]:not(:has(.ani-rc-collage)) .ani-rc-hero-figure:not([data-long="true"]) { font-size: clamp(64px, min(14vh, 8.4vw), 136px); }
+.ani-rc-tile[data-tile="hero"]:not(:has(.ani-rc-collage)) .ani-rc-hero-figure:not([data-long="true"]) { font-size: clamp(64px, min(calc(14 * var(--rc-vh, 1vh)), calc(8.4 * var(--rc-vw, 1vw))), 136px); }
 .ani-rc-hero-figure .ani-rc-unit { font-size: .34em; }
 .ani-rc-hero-note { color: var(--rc-ink-2); font-size: 12.5px; font-weight: 800; letter-spacing: .12em; }
 .ani-rc-days { display: grid; gap: 7px; min-width: 0; }
 .ani-rc-days-line { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .ani-rc-days-label { flex: none; color: var(--rc-ink-3); font-size: 12px; font-weight: 700; }
-.ani-rc-days-value { display: flex; align-items: baseline; margin-inline-start: auto; color: var(--rc-ink); font-size: clamp(20px, 3.2vh, 28px); font-weight: 900; letter-spacing: -.02em; line-height: 1; white-space: nowrap; }
+.ani-rc-days-value { display: flex; align-items: baseline; margin-inline-start: auto; color: var(--rc-ink); font-size: clamp(20px, calc(3.2 * var(--rc-vh, 1vh)), 28px); font-weight: 900; letter-spacing: -.02em; line-height: 1; white-space: nowrap; }
 .ani-rc-days-value .ani-rc-num ~ .ani-rc-num { margin-inline-start: .28em; color: var(--rc-ink-3); font-size: .6em; letter-spacing: 0; }
 .ani-rc-days-value .ani-rc-unit { color: var(--rc-ink-3); font-size: .5em; }
 .ani-rc-days-share { flex: none; color: var(--rc-accent); font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; }
 .ani-rc-days-meter { max-width: none; height: 6px; margin-top: 0; }
-.ani-rc-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(8px, 1.4vh, 14px) 18px; }
+.ani-rc-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(8px, calc(1.4 * var(--rc-vh, 1vh)), 14px) 18px; }
 .ani-rc-kpis[data-columns="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .ani-rc-kpis[data-columns="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.ani-rc-kpi { display: grid; gap: 2px; min-width: 0; border-top: 1px solid var(--rc-line-strong); padding-top: clamp(6px, 1.1vh, 10px); }
-.ani-rc-kpi-value { display: flex; align-items: baseline; color: var(--rc-ink); font-size: clamp(23px, 3.8vh, 34px); font-weight: 900; line-height: 1.04; letter-spacing: -.03em; }
+.ani-rc-kpi { display: grid; gap: 2px; min-width: 0; border-top: 1px solid var(--rc-line-strong); padding-top: clamp(6px, calc(1.1 * var(--rc-vh, 1vh)), 10px); }
+.ani-rc-kpi-value { display: flex; align-items: baseline; color: var(--rc-ink); font-size: clamp(23px, calc(3.8 * var(--rc-vh, 1vh)), 34px); font-weight: 900; line-height: 1.04; letter-spacing: -.03em; }
 .ani-rc-kpi-value .ani-rc-unit { font-size: .5em; color: var(--rc-ink-2); }
 .ani-rc-kpi-label { overflow: hidden; color: var(--rc-ink-3); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-/* 排行榜磚：真的 <ol>，每列平分剩下的高度 */
-.ani-rc-tile[data-tile="ledger"] { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 4px; }
-.ani-rc-ledger-list { display: grid; grid-auto-rows: minmax(0, 1fr); min-height: 0; margin: 0; padding: 0; list-style: none; }
-.ani-rc-ledger-row { display: grid; grid-template-columns: 18px clamp(32px, 4.4vh, 42px) minmax(0, 1fr) max-content; align-items: center; gap: 12px; min-height: 0; border-top: 1px solid var(--rc-line); }
-.ani-rc-ledger-rank { color: var(--rc-ink-3); font-size: 12px; font-weight: 900; text-align: center; font-variant-numeric: tabular-nums; }
-.ani-rc-ledger-row:first-child .ani-rc-ledger-rank { color: var(--rc-accent); }
-.ani-rc-ledger-cover { display: grid; place-items: center; overflow: hidden; width: 100%; aspect-ratio: 3 / 4; border-radius: 7px; background: var(--rc-surface-strong); box-shadow: 0 8px 18px rgba(0, 0, 0, .35); }
-.ani-rc-ledger-copy { display: grid; gap: 1px; min-width: 0; }
-.ani-rc-ledger-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--rc-ink); font-size: 13.5px; font-weight: 800; line-height: 1.3; word-break: keep-all; overflow-wrap: anywhere; }
-.ani-rc-ledger-meta { color: var(--rc-ink-3); font-size: 11.5px; }
-.ani-rc-ledger-copy .ani-rc-meter { max-width: 180px; height: 3px; margin-top: 4px; }
-.ani-rc-ledger-value { color: var(--rc-ink-2); font-size: 12.5px; font-weight: 800; font-variant-numeric: tabular-nums; }
+/* 亮點：只對這個人成立的一兩句話，放在英雄磚的大數字和 KPI 之間。 */
+.ani-rc-tile .ani-rc-highlights { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ani-rc-highlight { display: grid; grid-template-columns: clamp(30px, calc(4.2 * var(--rc-vh, 1vh)), 38px) minmax(0, 1fr); align-items: center; gap: 12px; min-width: 0; }
+.ani-rc-highlight-cover { display: grid; place-items: center; overflow: hidden; width: 100%; aspect-ratio: 3 / 4; border-radius: 6px; background: var(--rc-surface-strong); box-shadow: 0 6px 14px rgba(0, 0, 0, .35); }
+.ani-rc-highlight-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ani-rc-highlight-copy { display: grid; gap: 2px; min-width: 0; }
+.ani-rc-highlight-label { color: var(--rc-accent); font-size: 11.5px; font-weight: 900; letter-spacing: .1em; }
+.ani-rc-highlight-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--rc-ink-2); font-size: 12.5px; line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
+/* 矮的英雄磚只放得下一則亮點。 */
+@container (max-height: 510px) { .ani-rc-highlight + .ani-rc-highlight { display: none; } }
+/* 磚底的補充說明：貼齊磚底。 */
+.ani-rc-tile .ani-rc-tile-notes { display: grid; gap: 7px; margin: auto 0 0; padding: 0; list-style: none; color: var(--rc-ink-2); font-size: 12.5px; line-height: 1.45; }
+.ani-rc-drops { display: grid; gap: 6px; min-height: 0; margin-top: 4px; }
+.ani-rc-drops-title { color: var(--rc-ink-3); font-size: 11.5px; font-weight: 800; letter-spacing: .08em; }
+.ani-rc-tile .ani-rc-drops-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.ani-rc-drop, .ani-rc-bar-row { display: grid; grid-template-columns: minmax(56px, 5.5em) minmax(0, 1fr) max-content; align-items: center; gap: 10px; font-size: 12.5px; }
+.ani-rc-drop[data-gap="true"] { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--rc-line); }
+.ani-rc-drop-label { overflow: hidden; color: var(--rc-ink); font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.ani-rc-drop .ani-rc-meter, .ani-rc-bar-row .ani-rc-meter { max-width: none; height: 5px; margin-top: 0; }
+.ani-rc-taste-board { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); align-items: start; gap: 14px 22px; min-height: 0; margin-top: 2px; }
+.ani-rc-tile .ani-rc-taste-bars { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.ani-rc-tile .ani-rc-taste-credits { display: grid; gap: 10px; margin: 0; padding: 0 0 0 18px; border-left: 1px solid var(--rc-line); list-style: none; }
+.ani-rc-taste-credit { display: grid; gap: 1px; min-width: 0; }
+.ani-rc-taste-credit .ani-rc-credit-label { color: var(--rc-ink-3); font-size: 11.5px; font-weight: 800; letter-spacing: .08em; }
+.ani-rc-taste-credit-value { overflow: hidden; color: var(--rc-ink); font-size: 13.5px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.ani-rc-taste-credit-meta { color: var(--rc-ink-3); font-size: 11.5px; }
+.ani-rc-drop-value { color: var(--rc-ink-3); font-variant-numeric: tabular-nums; }
+.ani-rc-tile .ani-rc-tile-notes li { padding-top: 7px; border-top: 1px solid var(--rc-line); }
 /* 時鐘磚：每種尺寸都有 00/06/12/18 刻度 */
 .ani-rc-mini-clock { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 3px; min-height: 0; flex: 1 1 auto; }
 .ani-rc-mini-bars { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; align-items: end; min-height: 28px; border-bottom: 1px solid var(--rc-line-strong); }
@@ -368,11 +424,11 @@ const posterCss = `
 .ani-rc-tile[data-tile="habit-clock"]:is([data-w="6"], [data-w="8"]):not([data-h="1"]):not(:has(> .ani-rc-weekdays)) > .ani-rc-mini-clock { grid-row: 1 / -1; }
 .ani-rc-tile[data-tile="habit-clock"]:is([data-w="6"], [data-w="8"]):not([data-h="1"]) > .ani-rc-weekdays { grid-column: 2; grid-row: 4; }
 .ani-rc-tile[data-tile="habit-clock"]:not([data-h="1"]) .ani-rc-mini-clock { min-height: 56px; }
-.ani-rc-tile:not([data-h="1"]) .ani-rc-tile-value { font-size: clamp(30px, 5.4vh, 52px); }
+.ani-rc-tile:not([data-h="1"]) .ani-rc-tile-value { font-size: clamp(30px, calc(5.4 * var(--rc-vh, 1vh)), 52px); }
 .ani-rc-tile[data-tile="habit-clock"][data-h="1"] { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); grid-template-rows: auto auto minmax(0, 1fr); column-gap: 16px; row-gap: 6px; }
 .ani-rc-tile[data-tile="habit-clock"][data-h="1"] .ani-rc-mini-clock { grid-column: 2; grid-row: 1 / -1; }
 .ani-rc-tile[data-tile="habit-clock"][data-h="1"] .ani-rc-tile-foot { align-self: end; white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.ani-rc-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; flex: none; height: clamp(44px, 7vh, 64px); }
+.ani-rc-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; flex: none; height: clamp(44px, calc(7 * var(--rc-vh, 1vh)), 64px); }
 .ani-rc-weekday { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 3px; min-height: 0; text-align: center; }
 .ani-rc-weekdays[data-counts="true"] .ani-rc-weekday { grid-template-rows: minmax(0, 1fr) auto auto; gap: 1px; }
 .ani-rc-weekday-track { display: flex; align-items: flex-end; min-height: 0; }
@@ -385,7 +441,7 @@ const posterCss = `
 .ani-rc-tile[data-tile="weekday"] .ani-rc-weekdays { flex: 1 1 auto; height: auto; min-height: 56px; }
 /* 馬拉松磚：數字 + 整段期間的時間軸（亮帶＝最長連續，圓點＝單日最高） */
 /* 大馬拉松磚：數字與時間軸整組垂直置中，不把時間軸推到底、中間留一片空。 */
-.ani-rc-tile[data-tile="marathon"]:not([data-h="1"]) { gap: clamp(14px, 2.6vh, 24px); }
+.ani-rc-tile[data-tile="marathon"]:not([data-h="1"]) { gap: clamp(14px, calc(2.6 * var(--rc-vh, 1vh)), 24px); }
 .ani-rc-tile[data-tile="marathon"]:not([data-h="1"]) > .ani-rc-tile-label + * { margin-top: auto; }
 .ani-rc-tile[data-tile="marathon"]:not([data-h="1"]) > :nth-last-child(2) { margin-bottom: auto; }
 .ani-rc-tile[data-tile="marathon"]:not([data-h="1"]) .ani-rc-ribbon { margin-top: 0; }
@@ -410,7 +466,7 @@ const posterCss = `
 .ani-rc-tile[data-h="1"] .ani-rc-ribbon-ends > :last-child { grid-column: 3; grid-row: 1; }
 .ani-rc-tile[data-h="1"] .ani-rc-ribbon-legend { display: none; }
 /* 作品型磚：封面 + 標題 + 細節（窄磚時細節各占一行，數字不被省略） */
-.ani-rc-work { display: grid; grid-template-columns: clamp(34px, 5vh, 46px) minmax(0, 1fr); align-items: center; gap: 12px; min-width: 0; }
+.ani-rc-work { display: grid; grid-template-columns: clamp(34px, calc(5 * var(--rc-vh, 1vh)), 46px) minmax(0, 1fr); align-items: center; gap: 12px; min-width: 0; }
 .ani-rc-work-cover { display: grid; place-items: center; overflow: hidden; width: 100%; aspect-ratio: 3 / 4; border-radius: 8px; background: var(--rc-surface-strong); box-shadow: 0 10px 22px rgba(0, 0, 0, .4); }
 .ani-rc-work-copy { display: grid; gap: 3px; min-width: 0; }
 .ani-rc-work-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--rc-ink); font-size: 13.5px; font-weight: 800; line-height: 1.3; word-break: keep-all; overflow-wrap: anywhere; }
@@ -453,20 +509,37 @@ const posterCss = `
   .ani-rc-tile[data-tile="habit-clock"] .ani-rc-tile-foot, .ani-rc-tile-meter, .ani-rc-credits, .ani-rc-ribbon { display: none; }
 }
 /* 節奏條：呼應擴充功能本身的熱度圖 */
-.ani-rc-rhythm { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); align-items: center; gap: 24px; margin: 0; border: 1px solid rgba(148, 170, 220, .14); border-radius: 18px; background: rgba(146, 172, 228, .04); padding: 10px 20px; }
-.ani-rc-rhythm-caption { display: grid; gap: 1px; }
-.ani-rc-rhythm-peak { color: var(--rc-ink); font-size: 15px; font-weight: 900; }
-.ani-rc-rhythm-detail { color: var(--rc-ink-3); font-size: 12px; }
-.ani-rc-rhythm-chart { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 3px; height: clamp(50px, 7.4vh, 70px); }
-.ani-rc-rhythm-bars, .ani-rc-rhythm-ticks { display: grid; grid-template-columns: repeat(var(--rc-points, 12), minmax(0, 1fr)); gap: 4px; }
-.ani-rc-rhythm[data-granularity="week"] :is(.ani-rc-rhythm-bars, .ani-rc-rhythm-ticks) { gap: 6px; }
-.ani-rc-rhythm[data-granularity="day"] :is(.ani-rc-rhythm-bars, .ani-rc-rhythm-ticks) { gap: 2px; }
-.ani-rc-rhythm-bars { align-items: end; min-height: 0; border-bottom: 1px solid var(--rc-line-strong); }
-.ani-rc-rhythm-bar { display: block; height: max(2px, calc(var(--rc-level, 0) * 100%)); border-radius: 3px 3px 1px 1px; background: color-mix(in srgb, var(--rc-accent) 44%, rgba(148, 170, 220, .2)); transform-origin: bottom; }
-.ani-rc-rhythm-bar[data-empty="true"] { background: rgba(148, 170, 220, .14); }
-.ani-rc-rhythm-bar[data-peak="true"] { background: var(--rc-accent); box-shadow: 0 0 12px color-mix(in srgb, var(--rc-accent) 50%, transparent); }
-.ani-rc-rhythm-ticks { color: var(--rc-ink-3); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
-.ani-rc-rhythm-ticks span { overflow: visible; }
+.ani-rc-calendar { --rc-cell: clamp(7px, calc(1.02 * var(--rc-vh, 1vh)), 10px); --rc-cell-gap: 2px; position: relative; display: grid; grid-template-columns: minmax(140px, 200px) max-content minmax(0, 1fr); align-items: center; gap: 28px; margin: 0; border: 1px solid rgba(148, 170, 220, .14); border-radius: 18px; background: rgba(146, 172, 228, .04); padding: 7px 20px 8px; }
+.ani-rc-calendar-caption { display: grid; gap: 3px; }
+.ani-rc-calendar-days { display: flex; align-items: baseline; gap: 6px; color: var(--rc-ink); font-size: clamp(20px, calc(3 * var(--rc-vh, 1vh)), 26px); font-weight: 900; letter-spacing: -.02em; line-height: 1; white-space: nowrap; }
+.ani-rc-calendar-total { color: var(--rc-ink-3); font-size: .55em; letter-spacing: 0; }
+.ani-rc-calendar-detail { color: var(--rc-ink-3); font-size: 12px; }
+.ani-rc-calendar-chart { display: grid; gap: 2px; }
+.ani-rc-calendar-months, .ani-rc-calendar-grid, .ani-rc-calendar-band { display: grid; grid-template-columns: repeat(var(--rc-columns, 53), var(--rc-cell)); column-gap: var(--rc-cell-gap); }
+.ani-rc-calendar[data-layout="strip"] { grid-template-columns: minmax(140px, 200px) minmax(0, 1fr) max-content; }
+.ani-rc-calendar[data-layout="strip"] :is(.ani-rc-calendar-months, .ani-rc-calendar-grid, .ani-rc-calendar-band) { grid-template-columns: repeat(var(--rc-columns, 30), minmax(0, 1fr)); column-gap: 3px; }
+.ani-rc-calendar[data-layout="strip"] .ani-rc-calendar-grid { grid-template-rows: clamp(22px, calc(3.4 * var(--rc-vh, 1vh)), 32px); }
+.ani-rc-calendar[data-layout="strip"] .ani-rc-cal-day { border-radius: 4px; }
+.ani-rc-calendar[data-layout="strip"] .ani-rc-calendar-months { order: 1; }
+.ani-rc-calendar-months { height: 13px; color: var(--rc-ink-3); font-size: 11px; line-height: 13px; font-variant-numeric: tabular-nums; }
+.ani-rc-calendar-months span { grid-row: 1; overflow: visible; white-space: nowrap; }
+.ani-rc-calendar-grid { grid-template-rows: repeat(7, var(--rc-cell)); grid-auto-flow: column; row-gap: var(--rc-cell-gap); }
+.ani-rc-cal-day { display: block; border-radius: 2px; background: rgba(148, 170, 220, .1); }
+.ani-rc-cal-day[data-pad="true"] { background: transparent; }
+.ani-rc-cal-day[data-level="1"] { background: color-mix(in srgb, var(--rc-accent) 34%, rgba(148, 170, 220, .12)); }
+.ani-rc-cal-day[data-level="2"] { background: color-mix(in srgb, var(--rc-accent) 56%, rgba(148, 170, 220, .12)); }
+.ani-rc-cal-day[data-level="3"] { background: color-mix(in srgb, var(--rc-accent) 78%, rgba(148, 170, 220, .12)); }
+.ani-rc-cal-day[data-level="4"] { background: var(--rc-accent); }
+.ani-rc-cal-day[data-peak="true"] { outline: 2px solid var(--rc-ink); outline-offset: 1px; }
+.ani-rc-calendar-band { height: 3px; }
+.ani-rc-calendar-streak { display: block; border-radius: 999px; background: var(--rc-ink); opacity: .8; }
+.ani-rc-calendar-facts { display: grid; grid-template-columns: 12px max-content max-content; justify-self: center; gap: 8px 10px; margin: 0; padding: 0; list-style: none; }
+.ani-rc-calendar-fact { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: baseline; white-space: nowrap; }
+.ani-rc-calendar-fact strong { color: var(--rc-ink); font-size: 17px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.ani-rc-calendar-fact > span:last-child { color: var(--rc-ink-3); font-size: 12px; }
+.ani-rc-calendar-mark { align-self: center; width: 12px; height: 10px; border-radius: 2px; }
+.ani-rc-calendar-fact[data-mark="streak"] .ani-rc-calendar-mark { height: 3px; border-radius: 999px; background: var(--rc-ink); opacity: .8; }
+.ani-rc-calendar-fact[data-mark="peak"] .ani-rc-calendar-mark { width: 9px; height: 9px; outline: 2px solid var(--rc-ink); outline-offset: 1px; background: var(--rc-accent); }
 `;
 
 export const recapCss = `
@@ -483,8 +556,7 @@ ${posterCss}
 @media (max-height: 860px) {
   .ani-rc-summary { padding-top: calc(var(--rc-top-inset) + 6px); padding-bottom: 14px; }
   .ani-rc-poster, .ani-rc-poster-grid { gap: 10px; }
-  .ani-rc-rhythm { padding-block: 7px; }
-  .ani-rc-rhythm-chart { height: 46px; }
+  .ani-rc-calendar { --rc-cell: 8px; padding-block: 5px 6px; }
   .ani-rc-visual { gap: 10px; }
   .ani-rc-hero-stat { gap: 6px; padding-bottom: 14px; }
   .ani-rc-hero-value { font-size: clamp(48px, 9vh, 84px); }
@@ -505,9 +577,10 @@ ${posterCss}
 }
 @media (forced-colors: active) {
   /* 半透明的 color-mix 長條在強制色彩下會被換成 Canvas 而消失：每根長條都要給系統色。 */
-  .ani-rc-clock-bar, .ani-rc-mini-bar, .ani-rc-mini-bar[data-segment], .ani-rc-rhythm-bar, .ani-rc-weekday-bar, .ani-rc-season-bar, .ani-rc-mini-season-bar { background: CanvasText; }
-  .ani-rc-rhythm-bar[data-empty="true"] { background: GrayText; }
-  .ani-rc-segment-fill, .ani-rc-meter-fill, .ani-rc-clock-bar[data-peak="true"], .ani-rc-mini-bar[data-peak="true"], .ani-rc-rhythm-bar[data-peak="true"], .ani-rc-weekday[data-top="true"] .ani-rc-weekday-bar, .ani-rc-season-column[data-leading="true"] .ani-rc-season-bar, .ani-rc-mini-season[data-leading="true"] .ani-rc-mini-season-bar { background: Highlight; }
+  .ani-rc-clock-bar, .ani-rc-mini-bar, .ani-rc-mini-bar[data-segment], .ani-rc-cal-day[data-level]:not([data-level="0"]), .ani-rc-outcome-segment, .ani-rc-outcome-swatch, .ani-rc-weekday-bar, .ani-rc-season-bar, .ani-rc-mini-season-bar { background: CanvasText; }
+  .ani-rc-cal-day[data-level="0"] { outline: 1px solid GrayText; outline-offset: -1px; }
+  .ani-rc-calendar-streak, .ani-rc-calendar-fact[data-mark="streak"] .ani-rc-calendar-mark { background: Highlight; opacity: 1; }
+  .ani-rc-segment-fill, .ani-rc-meter-fill, .ani-rc-clock-bar[data-peak="true"], .ani-rc-mini-bar[data-peak="true"], .ani-rc-cal-day[data-peak="true"], .ani-rc-weekday[data-top="true"] .ani-rc-weekday-bar, .ani-rc-season-column[data-leading="true"] .ani-rc-season-bar, .ani-rc-mini-season[data-leading="true"] .ani-rc-mini-season-bar { background: Highlight; }
   .ani-rc-segment::before, .ani-rc-tile-surface, .ani-rc-persona { border: 1px solid CanvasText; }
   .ani-rc-ribbon-streak, .ani-rc-ribbon-peak { background: Highlight; }
   .ani-recap-primary-button { border: 1px solid ButtonText; }

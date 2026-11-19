@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AnalyticsResult } from "../analytics";
 import { buildRecapDeck, type RecapPresentationChapter } from "./recap-deck";
-import { buildChapterScene, buildIntroScene, type RecapSceneContext } from "./recap-scenes";
+import { buildChapterScene, buildIntroScene, chapterCoverUrls, type RecapSceneContext } from "./recap-scenes";
 import { FakeNode, findAll, hasClass, installFakeDocument } from "./recap-test-dom";
-import { fullResult } from "./recap-test-fixtures";
+import { bingeResult, cover, fullResult } from "./recap-test-fixtures";
 
 let restoreDocument: () => void = () => undefined;
 
@@ -16,6 +16,23 @@ afterEach(() => {
 });
 
 const byClass = (root: FakeNode, name: string): FakeNode[] => findAll(root, (node) => hasClass(node, name));
+
+describe("binge chapter", () => {
+  it("uses daily episode rate as the hero and ranking metric without duration headlines", () => {
+    const chapter = buildRecapDeck(bingeResult()).chapters.find((item) => item.kind === "binge")!;
+    const scene = buildChapterScene(chapter);
+    const root = scene.root as unknown as FakeNode;
+    expect(root.textContent).toContain("補番紀錄");
+    expect(root.textContent).toContain("補番作品 A");
+    expect(root.textContent).toContain("補番作品 B");
+    expect(root.textContent).toContain("2.4 集／日");
+    expect(root.textContent).toContain("平均 3 集／日");
+    expect(root.textContent).not.toMatch(/12 集|24 集|4 天|7 天|耗時|最快的一部|proxy|集中收尾|最後四集|168|官方資料/);
+    expect(byClass(root, "ani-rc-row")).toHaveLength(1);
+    expect(scene.imprintUrl).toBe(cover("binge-b"));
+    expect(chapterCoverUrls(chapter)).toEqual([cover("binge-b"), cover("binge-a")]);
+  });
+});
 
 describe("intro scene in-place updates", () => {
   const contextFor = (result: AnalyticsResult): RecapSceneContext => ({
@@ -49,50 +66,40 @@ describe("intro scene in-place updates", () => {
 });
 
 describe("platform-taste chapter", () => {
-  const row = (animeSn: number, personalWatchRank: number, platformRank: number) => ({
+  const gem = (animeSn: number, popularityRank: number) => ({
     animeSn,
     title: `作品 ${animeSn}`,
     coverUrl: null,
-    personalWatchRank,
-    personalWatchCount: 20 - personalWatchRank,
-    platformRank,
-    platformPopular: 1000 - platformRank,
-    gap: platformRank - personalWatchRank
+    cohortYear: 2026,
+    cohortSeason: "summer" as const,
+    cohortSize: 20,
+    popularityRank,
+    cohortLeaderTitle: "大作",
+    popularityRatio: 0.2,
+    cohortLabel: "2026 夏季"
   });
-  const chapter = (hiddenGemIndex: number | null): RecapPresentationChapter => {
-    const rows = [row(1, 1, 2), row(2, 2, 1), row(3, 3, 90), row(4, 4, 5), row(5, 5, 6)];
-    return {
-      id: "platform-taste",
-      kind: "platform-taste",
-      title: "私藏",
-      eyebrow: "和平台比一比",
-      narrative: "",
-      evidence: [],
-      payload: { rows, hiddenGem: hiddenGemIndex === null ? null : rows[hiddenGemIndex]!, averageGap: 0 }
-    };
-  };
+  const chapter = (gems: ReturnType<typeof gem>[]): RecapPresentationChapter => ({
+    id: "platform-taste",
+    kind: "platform-taste",
+    title: "私藏",
+    eyebrow: "你的私藏",
+    narrative: "",
+    evidence: [],
+    payload: { gems }
+  });
   const listed = (root: FakeNode): (string | undefined)[] =>
     byClass(root, "ani-rc-row").map((node) => byClass(node, "ani-rc-row-cover")[0]!.dataset.rcShared);
-  const ranks = (root: FakeNode): string[] =>
-    byClass(root, "ani-rc-row").map((node) => byClass(node, "ani-rc-row-rank")[0]!.textContent);
-  const highlighted = (root: FakeNode): string[] =>
-    byClass(root, "ani-rc-row").filter((node) => node.dataset.lead === "true")
-      .map((node) => byClass(node, "ani-rc-row-title")[0]!.textContent);
   const lead = (root: FakeNode): string | undefined => byClass(root, "ani-rc-lead-cover")[0]?.dataset.rcShared;
 
-  it("lists at most four rows without skipping a rank, like the other chapters", () => {
-    // 私藏排第 3：照名次列前四名並標亮它，不會讀成 1、2、4、5；它的封面只由左欄當共享元素。
-    const withGem = buildChapterScene(chapter(2)).root as unknown as FakeNode;
-    expect(lead(withGem)).toBe("anime-3");
-    expect(ranks(withGem)).toEqual(["1", "2", "3", "4"]);
-    expect(listed(withGem)).toEqual(["anime-1", "anime-2", undefined, "anime-4"]);
-    expect(highlighted(withGem)).toEqual(["作品 3"]);
+  it("leads with the coldest favorite and lists a second gem by its popularity rank", () => {
+    const one = buildChapterScene(chapter([gem(3, 15)])).root as unknown as FakeNode;
+    expect(lead(one)).toBe("anime-3");
+    expect(listed(one)).toEqual([]);
+    expect(one.textContent).toContain("2026 夏季開播、你也看過的 20 部作品裡");
+    expect(one.textContent).toContain("大作");
 
-    // 主角是第 1 名：和別章一樣從第 2 名接下去。
-    const noGem = buildChapterScene(chapter(null)).root as unknown as FakeNode;
-    expect(lead(noGem)).toBe("anime-1");
-    expect(ranks(noGem)).toEqual(["2", "3", "4", "5"]);
-    expect(listed(noGem)).toEqual(["anime-2", "anime-3", "anime-4", "anime-5"]);
-    expect(highlighted(noGem)).toEqual([]);
+    const two = buildChapterScene(chapter([gem(3, 15), gem(4, 18)])).root as unknown as FakeNode;
+    expect(lead(two)).toBe("anime-3");
+    expect(listed(two)).toEqual(["anime-4"]);
   });
 });

@@ -1,5 +1,6 @@
-import type { AnalyticsResult, CoverageResult } from "../analytics";
-import { analysisScopeKey, type AnalysisScope, type CalendarSeason, type ResolvedPeriod } from "../period";
+import type { AnalyticsResult, CoverageResult, DailyCount } from "../analytics";
+import { analysisScopeKey, resolvePeriod, type AnalysisScope, type CalendarSeason, type ResolvedPeriod } from "../period";
+import { addTaipeiCalendarDays } from "../time";
 
 /** 回顧測試共用的分析結果樣本：2026 上架年度，含所有章節需要的資料。 */
 export const instant = (value: string): Date => new Date(value);
@@ -51,6 +52,16 @@ export const resolvedPeriod = (
   };
 };
 
+/** 從 startDateKey 起連續 dayCount 天；沒列出的日子為 0。 */
+export const dailyCountsFrom = (
+  startDateKey: string,
+  dayCount: number,
+  counts: Readonly<Record<string, number>>
+): DailyCount[] => Array.from({ length: dayCount }, (_, index) => {
+  const dateKey = addTaipeiCalendarDays(startDateKey, index);
+  return { dateKey, count: counts[dateKey] ?? 0 };
+});
+
 export const seasonRow = (
   season: CalendarSeason,
   watchCount: number,
@@ -92,6 +103,17 @@ export const fullResult = (): AnalyticsResult => {
       { label: "2026-01", count: 2, contentMinutes: 70 },
       { label: "2026-07", count: 5, contentMinutes: 160 }
     ],
+    dailyCounts: dailyCountsFrom("2026-01-01", 365, {
+      "2026-01-10": 1,
+      "2026-01-11": 1,
+      "2026-07-01": 1,
+      "2026-07-02": 1,
+      "2026-07-03": 1,
+      "2026-07-04": 4,
+      "2026-07-10": 1,
+      "2026-07-11": 1,
+      "2026-07-12": 1
+    }),
     seasonBreakdown: [
       seasonRow("winter", 3, 90),
       seasonRow("spring", 2, 50),
@@ -166,7 +188,9 @@ export const fullResult = (): AnalyticsResult => {
           coverUrl: cover("anime-a"),
           watchedEpisodeCount: 12,
           totalEpisode: 12,
-          ratio: 1
+          ratio: 1,
+          isOngoing: false,
+          outcome: "finished"
         },
         {
           animeSn: 20,
@@ -174,10 +198,14 @@ export const fullResult = (): AnalyticsResult => {
           coverUrl: cover("anime-b"),
           watchedEpisodeCount: 8,
           totalEpisode: 12,
-          ratio: 2 / 3
+          ratio: 2 / 3,
+          isOngoing: false,
+          outcome: "midway"
         }
-      ]
+      ],
+      dropTags: []
     },
+    binge: { available: false, rows: [] },
     habitClock: {
       available: true,
       hourCounts: Array.from({ length: 24 }, (_, hour) =>
@@ -262,6 +290,53 @@ export const fullResult = (): AnalyticsResult => {
           wilsonLower95: 0.237,
           distinctOpponentCount: 4,
           decisionBucketCount: 5
+        }
+      ]
+    },
+    highlights: { newYearsEve: null, dawn: null, oldWorks: null },
+    favorites: { seasons: [], hiddenGems: [] }
+  };
+};
+
+/** A watched-month recap with a cross-month completion and a longer season. */
+export const bingeResult = (): AnalyticsResult => {
+  const scope: AnalysisScope = {
+    axis: "watched-at",
+    dayBoundaryMode: "calendar",
+    period: { kind: "calendar-month", year: 2026, month: 7 }
+  };
+  return {
+    ...fullResult(),
+    scope,
+    period: resolvePeriod(scope, instant("2026-08-01T00:00:00+08:00")),
+    binge: {
+      available: true,
+      rows: [
+        {
+          rank: 1,
+          animeSn: 40,
+          title: "補番作品 B",
+          coverUrl: cover("binge-b"),
+          episodeCount: 24,
+          startedAt: instant("2026-07-01T20:00:00+08:00"),
+          completedAt: instant("2026-07-08T20:00:00+08:00"),
+          elapsedMinutes: 7 * 24 * 60,
+          spanDays: 8,
+          activeDayCount: 6,
+          episodesPerDay: 3
+        },
+        {
+          rank: 2,
+          animeSn: 30,
+          title: "補番作品 A",
+          coverUrl: cover("binge-a"),
+          episodeCount: 12,
+          startedAt: instant("2026-06-30T20:00:00+08:00"),
+          completedAt: instant("2026-07-04T20:00:00+08:00"),
+          elapsedMinutes: 4 * 24 * 60,
+          spanDays: 5,
+          activeDayCount: 3,
+          episodesPerDay: 2.4
         }
       ]
     }

@@ -42,6 +42,7 @@ const bundle = (
     animeSn,
     apiTitle: `API 動畫 ${animeSn}`,
     totalEpisode: 13,
+    isOngoing: false,
     seasonStartDateKey: "2026-04-01",
     seasonEndDateKey: "2026-06-30",
     coverUrl: `https://p2.bahamut.com.tw/anime-${animeSn}.JPG`,

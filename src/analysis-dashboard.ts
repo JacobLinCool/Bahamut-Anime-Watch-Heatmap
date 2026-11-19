@@ -1,5 +1,6 @@
 import type {
   AnalyticsResult,
+  BingeRow,
   DimensionRow,
   PreferenceRow,
   RhythmPoint,
@@ -7,13 +8,17 @@ import type {
   TimelinessRow
 } from "./analytics";
 import {
+  formatBingeElapsed,
   formatCompactDuration,
   formatDuration,
+  formatEpisodesPerDay,
   formatInteger,
   formatLag,
   formatPercent,
+  formatTaipeiDate,
   truncateText
 } from "./analysis-format";
+import type { DayBoundaryMode } from "./model";
 import { createButton, createCover, element, textElement } from "./view-dom";
 
 export type DashboardRenderOptions = {
@@ -36,7 +41,10 @@ export const renderDashboard = (options: DashboardRenderOptions): HTMLElement =>
     ]),
     renderCluster("02", "你看什麼", "你的口味，和花最多時間的作品", [
       hasTasteRows(result) ? renderTaste(result) : null,
-      result.runtime.available ? renderRuntime(result) : null
+      result.runtime.available ? renderRuntime(result) : null,
+      result.binge.available && result.scope.axis === "watched-at"
+        ? renderBingeRanking(result.binge.rows, result.scope.dayBoundaryMode)
+        : null
     ]),
     renderCluster("03", "你怎麼選", "有得選時的取捨，和追番的速度", [
       result.preference.available ? renderPreference(result.preference.rows) : null,
@@ -413,6 +421,100 @@ const renderRuntimeRow = (row: SeriesRuntimeRow, level: number): HTMLElement => 
   return item;
 };
 
+type BingeSort = "elapsed" | "daily-rate";
+
+/** A complete, sortable season list; no rows means no empty statistics module. */
+export const renderBingeRanking = (
+  rows: readonly BingeRow[],
+  dayBoundaryMode: DayBoundaryMode
+): HTMLElement | null => {
+  if (rows.length === 0) return null;
+
+  const section = moduleShell(
+    "補番排行榜",
+    "各作品分開比較平均每天觀看集數，按補完日期計入這段期間。",
+    `${formatInteger(rows.length)} 部`
+  );
+  section.className += " ani-dashboard-binge";
+  const controls = element("div", "ani-dashboard-binge-sort");
+  controls.setAttribute("role", "group");
+  controls.setAttribute("aria-label", "補番排行榜排序");
+  const elapsedButton = createButton("ani-dashboard-sort-button", "耗時最短");
+  const dailyButton = createButton("ani-dashboard-sort-button", "平均每天集數");
+  controls.append(dailyButton, elapsedButton);
+
+  const status = element("p", "ani-dashboard-sr-only");
+  status.setAttribute("role", "status");
+  const list = element("ol", "ani-dashboard-binge-list");
+  list.setAttribute("aria-label", "補番作品排行");
+  const boundary = dayBoundaryMode === "thirty-hour" ? "30H，每天 06:00 換日" : "24H，每天 00:00 換日";
+  const note = textElement(
+    "p",
+    "ani-dashboard-binge-note",
+    `平均每天集數＝全季集數 ÷ 含首尾的日期跨度，中間沒看的日子也算。採 ${boundary}；耗時包含停看間隔，並非實際播放時長。`
+  );
+
+  let selectedSort: BingeSort = "daily-rate";
+  const update = (sort: BingeSort): void => {
+    selectedSort = sort;
+    const sorted = [...rows].sort((left, right) =>
+      (sort === "elapsed"
+        ? left.elapsedMinutes - right.elapsedMinutes || right.episodesPerDay - left.episodesPerDay
+        : right.episodesPerDay - left.episodesPerDay || left.elapsedMinutes - right.elapsedMinutes)
+      || left.completedAt.getTime() - right.completedAt.getTime()
+      || left.animeSn - right.animeSn
+    );
+    let rank = 1;
+    list.replaceChildren(...sorted.map((row, index) => {
+      const previous = sorted[index - 1];
+      if (previous && (sort === "elapsed"
+        ? row.elapsedMinutes !== previous.elapsedMinutes
+        : row.episodesPerDay !== previous.episodesPerDay)) rank = index + 1;
+      return renderBingeRow(row, rank, sort);
+    }));
+    elapsedButton.setAttribute("aria-pressed", String(sort === "elapsed"));
+    dailyButton.setAttribute("aria-pressed", String(sort === "daily-rate"));
+    status.textContent = `依${sort === "elapsed" ? "補完耗時由短到長" : "平均每天集數由高到低"}排序，共 ${formatInteger(rows.length)} 部作品。`;
+  };
+  elapsedButton.addEventListener("click", () => {
+    if (selectedSort !== "elapsed") update("elapsed");
+  });
+  dailyButton.addEventListener("click", () => {
+    if (selectedSort !== "daily-rate") update("daily-rate");
+  });
+  update("daily-rate");
+  section.append(controls, status, list, note);
+  return section;
+};
+
+const renderBingeRow = (row: BingeRow, rank: number, sort: BingeSort): HTMLElement => {
+  const item = element("li", "ani-dashboard-ranked-row ani-dashboard-binge-row");
+  item.dataset.animeSn = String(row.animeSn);
+  const copy = rowCopy(row.title, `${formatInteger(row.episodeCount)} 集 · 日期跨度 ${formatInteger(row.spanDays)} 天`);
+  copy.append(textElement(
+    "span",
+    "ani-dashboard-binge-dates",
+    `${formatTaipeiDate(row.startedAt)} 開始 → ${formatTaipeiDate(row.completedAt)} 補完`
+  ));
+  const metrics = element("div", "ani-dashboard-binge-metrics");
+  const elapsed = textElement(
+    sort === "elapsed" ? "strong" : "span",
+    sort === "elapsed" ? "ani-dashboard-binge-primary" : "ani-dashboard-binge-secondary",
+    formatBingeElapsed(row.elapsedMinutes)
+  );
+  elapsed.setAttribute("aria-label", `補完耗時 ${formatBingeElapsed(row.elapsedMinutes)}`);
+  const rate = textElement(
+    sort === "daily-rate" ? "strong" : "span",
+    sort === "daily-rate" ? "ani-dashboard-binge-primary" : "ani-dashboard-binge-secondary",
+    formatEpisodesPerDay(row.episodesPerDay)
+  );
+  rate.setAttribute("aria-label", `平均每天 ${formatEpisodesPerDay(row.episodesPerDay)}`);
+  if (sort === "elapsed") metrics.append(elapsed, rate);
+  else metrics.append(rate, elapsed);
+  item.append(rankBadge(rank), createCover(row.coverUrl, row.title, "ani-dashboard-row-cover"), copy, metrics);
+  return item;
+};
+
 const renderPreference = (rows: readonly PreferenceRow[]): HTMLElement => {
   const module = moduleShell("有得選時，先看誰");
   const list = element("div", "ani-dashboard-list");
@@ -514,18 +616,18 @@ const renderDimension = (title: string, rows: readonly DimensionRow[]): HTMLElem
   const card = dimensionCard(title);
   const list = element("ol", "ani-dashboard-compact-list");
   const shown = rows.slice(0, 6);
-  const max = Math.max(1, ...shown.map((row) => row.watchCount));
-  // 每列都只來自一部作品時（常見於導演），bar 長度只是把同一件事畫兩次，省下來。
-  const meaningfulBars = shown.some((row) => row.animeCount > 1);
+  const max = Math.max(1, ...shown.map((row) => row.animeCount));
+  // 每列部數都一樣時（常見於導演），bar 長度只是把同一件事畫兩次，省下來。
+  const meaningfulBars = new Set(shown.map((row) => row.animeCount)).size > 1;
   for (const row of shown) {
     const item = element("li");
     const line = element("div", "ani-dashboard-compact-line");
     line.append(
       textElement("span", "ani-dashboard-compact-label", row.label),
-      textElement("span", "ani-dashboard-compact-value", `${formatInteger(row.watchCount)} 次觀看 · ${formatInteger(row.animeCount)} 部作品`)
+      textElement("span", "ani-dashboard-compact-value", `${formatInteger(row.animeCount)} 部作品 · ${formatInteger(row.watchCount)} 次觀看`)
     );
     item.append(line);
-    if (meaningfulBars) item.append(meterBar(row.watchCount / max));
+    if (meaningfulBars) item.append(meterBar(row.animeCount / max));
     list.append(item);
   }
   card.append(list);
@@ -649,6 +751,19 @@ export const dashboardCss = `
 .ani-dashboard-row-title { overflow: hidden; color: var(--ani-ink); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .ani-dashboard-row-meta { overflow: hidden; color: var(--ani-ink-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .ani-dashboard-row-value { color: var(--ani-ink); font-size: 12px; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
+.ani-dashboard-binge-sort { display: flex; flex-wrap: wrap; gap: 6px; }
+.ani-dashboard-sort-button { min-height: 36px; border: 1px solid var(--ani-line-strong); border-radius: var(--ani-r-pill); background: var(--ani-surface); color: var(--ani-ink-2); cursor: pointer; padding: 7px 14px; font: inherit; font-size: 12px; font-weight: 800; }
+.ani-dashboard-sort-button[aria-pressed="true"] { border-color: var(--ani-accent); background: var(--ani-accent-tint); color: var(--ani-accent-ink); }
+.ani-dashboard-sort-button:focus-visible { outline: 2px solid var(--ani-accent); outline-offset: 3px; }
+.ani-dashboard-binge-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.ani-dashboard-binge-row { grid-template-columns: 28px 42px minmax(0, 1fr) minmax(110px, max-content); gap: 14px; padding: 14px 0; }
+.ani-dashboard-binge-row .ani-dashboard-row-title { white-space: normal; overflow-wrap: anywhere; }
+.ani-dashboard-binge-row .ani-dashboard-row-meta { white-space: normal; }
+.ani-dashboard-binge-dates { color: var(--ani-ink-4); font-size: 10px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.ani-dashboard-binge-metrics { display: grid; justify-items: end; gap: 3px; text-align: right; font-variant-numeric: tabular-nums; }
+.ani-dashboard-binge-primary { color: var(--ani-accent-ink); font-size: 14px; font-weight: 800; }
+.ani-dashboard-binge-secondary { color: var(--ani-ink-3); font-size: 11px; }
+.ani-dashboard-binge-note { margin: 0; max-width: 76ch; color: var(--ani-ink-3); font-size: 11px; line-height: 1.7; }
 .ani-dashboard-feature { display: grid; grid-template-columns: 60px auto auto; align-items: center; gap: 16px; width: fit-content; max-width: 100%; overflow: hidden; border: 0; border-radius: var(--ani-r-md); background: linear-gradient(120deg, var(--ani-hot-tint), var(--ani-surface-sunken)); padding: 12px 22px 12px 12px; }
 .ani-dashboard-feature-cover { display: grid; place-items: center; overflow: hidden; width: 60px; aspect-ratio: 3 / 4; border-radius: 8px; background: linear-gradient(145deg, var(--ani-line), var(--ani-line-strong)); }
 .ani-dashboard-feature-cover img { width: 100%; height: 100%; object-fit: cover; }
@@ -710,6 +825,8 @@ export const dashboardCss = `
   .ani-dashboard-ranked-row { grid-template-columns: auto 36px minmax(0, 1fr); }
   .ani-dashboard-row-cover { width: 36px; }
   .ani-dashboard-row-value { grid-column: 2 / -1; text-align: left; padding-left: 47px; }
+  .ani-dashboard-binge-row { grid-template-columns: 24px 36px minmax(0, 1fr); gap: 10px; }
+  .ani-dashboard-binge-metrics { grid-column: 3; justify-items: start; text-align: left; }
   .ani-dashboard-platform-row { grid-template-columns: 36px minmax(0, 1fr); }
   .ani-dashboard-platform-ranks { grid-column: 2; justify-self: start; }
 }

@@ -505,6 +505,7 @@ const animeFingerprint = (metadata: AnimeMetadata): string => JSON.stringify({
   totalEpisode: metadata.totalEpisode,
   seasonStartDateKey: metadata.seasonStartDateKey,
   seasonEndDateKey: metadata.seasonEndDateKey,
+  isOngoing: metadata.isOngoing,
   coverUrl: metadata.coverUrl,
   tags: metadata.tags,
   maker: metadata.maker,

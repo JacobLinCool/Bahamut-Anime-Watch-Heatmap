@@ -168,7 +168,8 @@ describe("debug export report", () => {
     );
     expect(report.formatVersion).toBe(2);
     expect(report.diagnostics.metadata.policy).toEqual({
-      parserVersion: 2,
+      parserVersion: 3,
+      animeCacheTtlMilliseconds: 86_400_000,
       unavailableCacheBaseTtlMilliseconds: 86_400_000,
       unavailableCacheBackoffFactor: 4,
       unavailableCacheMaxTtlMilliseconds: 604_800_000,
@@ -241,6 +242,7 @@ const animeMetadata = (): AnimeMetadata => ({
   animeSn: 113583,
   apiTitle: "測試作品",
   totalEpisode: 12,
+  isOngoing: false,
   seasonStartDateKey: "2026-01-07",
   seasonEndDateKey: "2026-07-27",
   coverUrl: "https://i2.bahamut.com.tw/anime/cover.jpg",

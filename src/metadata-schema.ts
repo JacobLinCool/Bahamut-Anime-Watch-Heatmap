@@ -17,14 +17,17 @@ const MAX_EPISODE_REF_COUNT = 10_000;
 const MAX_GROUP_KEY_LENGTH = 128;
 /** The API's placeholder for an unknown series boundary date. */
 const UNKNOWN_DATE_SENTINEL = "0000/00/00";
+/** 官方用來表示「季度尚未結束」的結束日。 */
+const OPEN_ENDED_SEASON_SENTINEL = "2100/12/31";
 
 /**
  * Identifies the set of payloads parseMetadataResponse accepts. Bump it whenever
  * a parsing rule changes; negative cache records written by another version are
  * ignored so a schema fix applies to previously rejected episodes immediately.
  * v2: series date sentinel, non-integer episode numbers, date-only downTime.
+ * v3: open-ended season end (2100/12/31) marks a series that is still airing.
  */
-export const METADATA_PARSER_VERSION = 2;
+export const METADATA_PARSER_VERSION = 3;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -142,7 +145,12 @@ const parseMetadataFields = (
     apiTitle: requireNonBlankString(anime.title, "data.anime.title", MAX_GENERAL_STRING_LENGTH),
     totalEpisode: requireNonNegativeSafeInteger(anime.totalEpisode, "data.anime.totalEpisode"),
     seasonStartDateKey: parseNullableTaipeiDateKey(anime.seasonStart, "data.anime.seasonStart"),
-    seasonEndDateKey: parseNullableTaipeiDateKey(anime.seasonEnd, "data.anime.seasonEnd"),
+    seasonEndDateKey: anime.seasonEnd === OPEN_ENDED_SEASON_SENTINEL
+      ? null
+      : parseNullableTaipeiDateKey(anime.seasonEnd, "data.anime.seasonEnd"),
+    // 2026-11 實測：在播與已完結的作品 flag 都是 0，只有 seasonEnd 的 2100/12/31 分得出「還在播」；
+    // 0000/00/00 是日期未知（多為舊作），不能當成在播。
+    isOngoing: anime.seasonEnd === OPEN_ENDED_SEASON_SENTINEL,
     coverUrl: parseNullableHttpsUrl(anime.cover, "data.anime.cover"),
     tags: parseTags(anime.tags),
     maker: parseNullableText(anime.maker, "data.anime.maker"),

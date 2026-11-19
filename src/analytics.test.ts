@@ -59,6 +59,7 @@ const animeRecord = (
   animeSn,
   apiTitle: `API title ${animeSn}`,
   totalEpisode: references.length,
+  isOngoing: false,
   seasonStartDateKey: "2026-01-01",
   seasonEndDateKey: "2026-12-31",
   coverUrl: `https://p2.bahamut.com.tw/B/ACG/${animeSn}.JPG`,
@@ -124,7 +125,119 @@ const analyze = ({
   asOf
 });
 
+describe("highlights that only some people get", () => {
+  it("tells how the year began even when 30-hour days file that night under the year before", () => {
+    const records = [
+      episode(1, 10, 0, "2025-12-01T08:00:00+08:00"),
+      episode(2, 20, 0, "2025-12-31T08:00:00+08:00"),
+      episode(3, 20, 1, "2026-01-02T08:00:00+08:00")
+    ];
+    const entries = [
+      entry(1, "2025-12-31T23:50:00+08:00", "作品 A"),
+      entry(2, "2026-01-01T00:30:00+08:00", "作品 B"),
+      entry(3, "2026-01-03T20:00:00+08:00", "作品 B")
+    ];
+    const animeRecords = [animeRecord(10, [ref(1, 1)]), animeRecord(20, [ref(2, 1), ref(3, 2)])];
+    const year: AnalysisScope = { axis: "watched-at", dayBoundaryMode: "thirty-hour", period: { kind: "calendar-year", year: 2026 } };
+    const result = analyze({ entries, episodeRecords: records, animeRecords, scope: year });
+    expect(result.highlights.newYearsEve).toMatchObject({
+      year: 2026,
+      before: { animeSn: 10, episode: "第 1 集", watchedAt: instant("2025-12-31T23:50:00+08:00") },
+      after: { animeSn: 20, episode: "第 2 集", watchedAt: instant("2026-01-01T00:30:00+08:00") }
+    });
+    // 那一晚不在紀錄裡：沒看到不代表沒在看。
+    const late = analyze({ entries, episodeRecords: records, animeRecords, scope: year, historyCoverage: completeCoverage("2026-01-01T00:00:00+08:00") });
+    expect(late.highlights.newYearsEve).toBeNull();
+    // 不是年度回顧就不談跨年。
+    expect(analyze({ entries, episodeRecords: records, animeRecords, scope: watchedScope({ kind: "calendar-month", year: 2026, month: 1 }) })
+      .highlights.newYearsEve).toBeNull();
+  });
+
+  it("only calls it a night until dawn when the watching started before three and never paused for an hour", () => {
+    const records: EpisodeMetadata[] = [];
+    const entries: WatchEntry[] = [];
+    const watch = (videoSn: number, at: string): void => {
+      records.push(episode(videoSn, 10, videoSn - 1, "2026-07-01T08:00:00+08:00"));
+      entries.push(entry(videoSn, at, "作品 A"));
+    };
+    // 7/5：02:30 開始，每集間隔不到一小時，一路看到 06:20。
+    ["02:30", "03:10", "03:50", "04:40", "05:30", "06:20"].forEach((time, index) => watch(1 + index, `2026-07-05T${time}:00+08:00`));
+    // 7/10：早起才看，06:00 開始。
+    ["06:00", "06:40", "07:30"].forEach((time, index) => watch(20 + index, `2026-07-10T${time}:00+08:00`));
+    // 7/15：01:00 看一集，中斷四小時，05:00 再看到 06:50。
+    ["01:00", "05:00", "05:40", "06:50"].forEach((time, index) => watch(30 + index, `2026-07-15T${time}:00+08:00`));
+    const refs = records.map((record, index) => ref(record.videoSn, index + 1));
+    const result = analyze({ entries, episodeRecords: records, animeRecords: [animeRecord(10, refs)] });
+    expect(result.highlights.dawn).toMatchObject({
+      startedAt: instant("2026-07-05T02:30:00+08:00"),
+      endedAt: instant("2026-07-05T06:20:00+08:00"),
+      episodeCount: 6,
+      last: { animeSn: 10, episode: "第 6 集" }
+    });
+  });
+
+  it("counts a work as old only when the watched episode is not a new season of an old series", () => {
+    const records: EpisodeMetadata[] = [];
+    const entries: WatchEntry[] = [];
+    const animeRecords: AnimeMetadata[] = [];
+    const add = (animeSn: number, uploads: readonly string[], watchedFrom: number, overrides: Partial<AnimeMetadata>): void => {
+      const refs = uploads.map((uploaded, index) => {
+        const videoSn = animeSn * 100 + index;
+        records.push(episode(videoSn, animeSn, index, uploaded));
+        if (index >= watchedFrom) entries.push(entry(videoSn, `2026-07-${String(2 + index).padStart(2, "0")}T21:${String(animeSn).padStart(2, "0")}:00+08:00`, `作品 ${animeSn}`));
+        return ref(videoSn, index + 1);
+      });
+      animeRecords.push(animeRecord(animeSn, refs, overrides));
+    };
+    // 2010 年的作品，今年整批重新上架：舊作。
+    add(1, ["2026-06-01T12:00:00+08:00", "2026-06-01T12:00:00+08:00", "2026-06-01T12:00:00+08:00"], 0, { seasonStartDateKey: "2010-07-05", seasonEndDateKey: "2010-09-27" });
+    // 2023 年開播的系列，今年播新一季：作品編號一樣，但看的是新集數，不算舊作。
+    add(2, ["2023-04-12T23:00:00+08:00", "2023-04-19T23:00:00+08:00", "2026-04-08T23:00:00+08:00", "2026-04-15T23:00:00+08:00"], 2, { seasonStartDateKey: "2023-04-12", seasonEndDateKey: "2026-06-30" });
+    // 今年的新番。
+    add(3, ["2026-04-03T23:00:00+08:00", "2026-04-10T23:00:00+08:00"], 0, { seasonStartDateKey: "2026-04-03", seasonEndDateKey: "2026-06-30" });
+    const result = analyze({ entries, episodeRecords: records, animeRecords });
+    expect(result.highlights.oldWorks).toMatchObject({
+      workCount: 1,
+      episodeCount: 3,
+      datedEpisodeCount: 7,
+      oldest: { animeSn: 1, premiereYear: 2010 }
+    });
+  });
+});
+
 describe("volume, duration, and metadata dimensions", () => {
+  it("ranks tags and makers by how many works they cover, not by episodes", () => {
+    const records: EpisodeMetadata[] = [];
+    const entries: WatchEntry[] = [];
+    // 一部 24 集的長篇（類型「長篇」）對上兩部各兩集的作品（類型「短篇」）。
+    for (let index = 0; index < 24; index += 1) {
+      records.push(episode(100 + index, 1, index, "2026-07-01T08:00:00+08:00"));
+      entries.push(entry(100 + index, `2026-07-${String(2 + (index % 20)).padStart(2, "0")}T2${index % 4}:00:00+08:00`, "長篇"));
+    }
+    for (const [animeSn, base] of [[2, 200], [3, 300]] as const) {
+      for (let index = 0; index < 2; index += 1) {
+        records.push(episode(base + index, animeSn, index, "2026-07-01T08:00:00+08:00"));
+        entries.push(entry(base + index, `2026-07-2${5 + index}T1${animeSn}:00:00+08:00`, `短篇 ${animeSn}`));
+      }
+    }
+    const refsOf = (animeSn: number) => records.filter((record) => record.animeSn === animeSn)
+      .map((record) => ref(record.videoSn, record.episodeIndex + 1));
+    const result = analyze({
+      entries,
+      episodeRecords: records,
+      animeRecords: [
+        animeRecord(1, refsOf(1), { tags: ["長篇"], maker: "長篇工作室" }),
+        animeRecord(2, refsOf(2), { tags: ["短篇"], maker: "短篇工作室" }),
+        animeRecord(3, refsOf(3), { tags: ["短篇"], maker: "短篇工作室" })
+      ]
+    });
+    expect(result.catalog.tags.map((row) => [row.label, row.animeCount, row.watchCount])).toEqual([
+      ["短篇", 2, 4],
+      ["長篇", 1, 24]
+    ]);
+    expect(result.catalog.makers[0]).toMatchObject({ rank: 1, label: "短篇工作室", animeCount: 2 });
+  });
+
   it("counts watch events, unique episodes, and exact content duration separately", () => {
     const records = [episode(1, 10, 0, "2026-07-01T08:00:00+08:00", 47)];
     const anime = animeRecord(10, [ref(1, 1)]);
@@ -202,6 +315,53 @@ describe("volume, duration, and metadata dimensions", () => {
       totalEpisode: 3,
       ratio: 2 / 3
     });
+  });
+
+  it("sorts each verifiable work into how far you followed it, and counts drops per genre", () => {
+    const records: EpisodeMetadata[] = [];
+    const entries: WatchEntry[] = [];
+    const animeRecords: AnimeMetadata[] = [];
+    let videoSn = 1;
+    /** total 集的作品，看了 watched 這幾集（1-based）。 */
+    const work = (animeSn: number, total: number, watched: readonly number[], overrides: Partial<AnimeMetadata> = {}): void => {
+      const refs: EpisodeRef[] = [];
+      for (let number = 1; number <= total; number += 1) {
+        const sn = videoSn++;
+        records.push(episode(sn, animeSn, number - 1, "2026-07-01T08:00:00+08:00"));
+        refs.push(ref(sn, number));
+        if (watched.includes(number)) {
+          entries.push(entry(sn, `2026-07-${String(2 + (number % 25)).padStart(2, "0")}T${String(10 + (animeSn % 12)).padStart(2, "0")}:00:00+08:00`, `作品 ${animeSn}`));
+        }
+      }
+      animeRecords.push(animeRecord(animeSn, refs, overrides));
+    };
+    const range = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, index) => from + index);
+    work(1, 12, range(1, 12), { tags: ["校園"] });
+    work(2, 13, range(1, 12), { tags: ["校園"] });
+    work(3, 12, range(1, 7), { tags: ["校園"] });
+    work(4, 12, [1], { tags: ["校園"] });
+    work(5, 12, range(5, 9), { tags: ["校園"] });
+    work(6, 7, range(1, 7), { tags: ["校園"], isOngoing: true });
+    work(7, 7, range(1, 3), { tags: ["校園"], isOngoing: true });
+    const result = analyze({ entries, episodeRecords: records, animeRecords });
+
+    const outcomes = Object.fromEntries(result.completion.rows.map((row) => [row.animeSn, row.outcome]));
+    expect(outcomes).toEqual({
+      1: "finished",
+      2: "nearly",
+      3: "midway",
+      4: "dropped",
+      // 第 1 集不在紀錄裡：分不出是放棄還是早就看過。
+      5: "unknown-start",
+      6: "caught-up",
+      7: "behind"
+    });
+    // 只有 4 部從頭開始看、已完結：不到 8 部，類型的放棄比例不列。
+    expect(result.completion.dropTags).toEqual([]);
+
+    for (let animeSn = 10; animeSn < 14; animeSn += 1) work(animeSn, 12, range(1, 12), { tags: ["校園"] });
+    const more = analyze({ entries, episodeRecords: records, animeRecords });
+    expect(more.completion.dropTags).toEqual([{ label: "校園", startedCount: 8, droppedCount: 1, dropRate: 1 / 8 }]);
   });
 
   it("compares personal watch volume only with explicitly current platform snapshots", () => {
@@ -313,7 +473,7 @@ describe("volume, duration, and metadata dimensions", () => {
       episodeRecords: [episode(1, 10, 0, "2026-07-01T08:00:00+08:00")],
       animeRecords: [anime]
     });
-    expect(result.completion).toEqual({ available: false, rows: [] });
+    expect(result.completion).toEqual({ available: false, rows: [], dropTags: [] });
   });
 
   it.each([
@@ -326,7 +486,7 @@ describe("volume, duration, and metadata dimensions", () => {
       animeRecords: [animeRecord(10, references, { totalEpisode: 3 })]
     });
 
-    expect(result.completion).toEqual({ available: false, rows: [] });
+    expect(result.completion).toEqual({ available: false, rows: [], dropTags: [] });
   });
 });
 
@@ -530,7 +690,7 @@ describe("axis-specific active days and rhythm", () => {
     expect(result.rhythm.at(-1)?.label).toBe("2026-07-31");
   });
 
-  it("adds a seven-day rhythm for season scopes and folds the leftover days into the last week", () => {
+  it("lists every day of a season scope for the poster calendar", () => {
     const result = analyze({
       entries: [
         entry(1, "2026-07-20T10:00:00+08:00", "作品 A"),
@@ -546,11 +706,13 @@ describe("axis-specific active days and rhythm", () => {
       asOf: instant("2026-10-31T23:59:00+08:00")
     });
 
-    // 7/1–9/30 共 92 天：13 格，第 13 格吸收多出來的一天，不畫出只有一天的短柱。
-    expect(result.weeklyRhythm).toHaveLength(13);
-    expect(result.weeklyRhythm?.[0]).toEqual({ label: "2026-07-01", count: 1, contentMinutes: 20 });
-    expect(result.weeklyRhythm?.[1]).toEqual({ label: "2026-07-08", count: 1, contentMinutes: 24 });
-    expect(result.weeklyRhythm?.at(-1)).toMatchObject({ label: "2026-09-23", count: 1 });
+    // 7/1–9/30 共 92 天，每天一格（含沒看的日子），依上架日歸類。
+    expect(result.dailyCounts).toHaveLength(92);
+    expect(result.dailyCounts[0]).toEqual({ dateKey: "2026-07-01", count: 0 });
+    expect(result.dailyCounts.find((day) => day.dateKey === "2026-07-02")).toEqual({ dateKey: "2026-07-02", count: 1 });
+    expect(result.dailyCounts.find((day) => day.dateKey === "2026-07-08")).toEqual({ dateKey: "2026-07-08", count: 1 });
+    expect(result.dailyCounts.at(-1)).toEqual({ dateKey: "2026-09-30", count: 1 });
+    expect(result.dailyCounts.reduce((sum, day) => sum + day.count, 0)).toBe(3);
     // 儀表板用的月節奏不變。
     expect(result.rhythm.map((point) => point.label)).toEqual(["2026-07", "2026-08", "2026-09"]);
   });
@@ -933,6 +1095,74 @@ describe("timeliness and behavioral preference", () => {
 
     expect(result.preference.coverage.passed).toBe(true);
     expect(result.preference.choiceEventCount).toBe(1);
+  });
+
+  it("ranks each started season of a year on its own and calls a cold favorite a hidden gem", () => {
+    const build = (options: { readonly ongoing?: boolean; readonly cohortExtras?: number } = {}) => {
+      const records: EpisodeMetadata[] = [];
+      const entries: WatchEntry[] = [];
+      const references = new Map<number, EpisodeRef[]>();
+      const add = (videoSn: number, animeSn: number, episodeIndex: number, release: string, watchedAt?: string): void => {
+        records.push(episode(videoSn, animeSn, episodeIndex, release));
+        references.set(animeSn, [...(references.get(animeSn) ?? []), ref(videoSn, episodeIndex + 1)]);
+        if (watchedAt) entries.push(entry(videoSn, watchedAt, `作品 ${animeSn}`));
+      };
+      // 四部同時開始追；之後作品 1 有七天被先點開、作品 2 三天，作品 3、4 一直擱著。
+      for (const animeSn of [1, 2, 3, 4]) add(animeSn * 100, animeSn, 0, "2026-07-01T07:00:00+08:00", "2026-07-01T08:00:00+08:00");
+      // 作品快照在 7/14 取得：選擇時刻都要落在快照之前，才確定當時有哪些集數在等。
+      const firstDays = [3, 5, 7, 9, 10, 11, 12];
+      const secondDays = [4, 6, 8];
+      firstDays.forEach((day, index) =>
+        add(101 + index, 1, index + 1, "2026-07-02T08:00:00+08:00", `2026-07-${String(day).padStart(2, "0")}T10:00:00+08:00`));
+      secondDays.forEach((day, index) =>
+        add(201 + index, 2, index + 1, "2026-07-02T08:00:00+08:00", `2026-07-0${day}T10:00:00+08:00`));
+      add(199, 1, 8, "2026-07-02T08:00:00+08:00");
+      add(299, 2, 4, "2026-07-02T08:00:00+08:00");
+      for (const animeSn of [3, 4]) add(animeSn * 100 + 1, animeSn, 1, "2026-07-02T08:00:00+08:00");
+      // 同季開播、看過一集就結束的作品：只用來湊出同季的人氣名次。
+      const extras = options.cohortExtras ?? 5;
+      for (let index = 0; index < extras; index += 1) {
+        add(1000 + index, 50 + index, 0, "2026-07-01T07:00:00+08:00", "2026-07-01T08:00:00+08:00");
+      }
+      const popular = (animeSn: number): number => animeSn === 1 ? 100 : animeSn === 2 ? 5000 : 1000 + animeSn;
+      return analyze({
+        entries,
+        episodeRecords: records,
+        animeRecords: [...references].map(([animeSn, refs]) => animeRecord(animeSn, refs, {
+          seasonStartDateKey: "2026-07-01",
+          isOngoing: animeSn === 1 && options.ongoing === true,
+          platformSnapshot: { score: 4.5, reviewCount: 10, popular: popular(animeSn), observedAt }
+        })),
+        scope: watchedScope({ kind: "calendar-year", year: 2026 })
+      });
+    };
+
+    const result = build();
+    // 7 月底時秋季還沒開始，不列；冬、春沒有可比較的時刻，列出但選不出最愛。
+    expect(result.favorites.seasons.map((season) => [season.season, season.rows.map((row) => row.animeSn)])).toEqual([
+      ["winter", []],
+      ["spring", []],
+      ["summer", [1, 2]]
+    ]);
+    expect(result.favorites.seasons[2]?.choiceEventCount).toBe(10);
+    // 作品 1 是夏季最愛，同季 9 部裡人氣墊底；作品 2 也是最愛，但同季最熱門。
+    expect(result.favorites.hiddenGems).toEqual([{
+      animeSn: 1,
+      title: "作品 1",
+      coverUrl: "https://p2.bahamut.com.tw/B/ACG/1.JPG",
+      cohortYear: 2026,
+      cohortSeason: "summer",
+      cohortSize: 9,
+      popularityRank: 9,
+      cohortLeaderTitle: "作品 2",
+      popularityRatio: 100 / 5000
+    }]);
+    // 還在播的作品人氣還在累積；同季看過的作品太少時名次沒有意義。
+    expect(build({ ongoing: true }).favorites.hiddenGems).toEqual([]);
+    expect(build({ cohortExtras: 3 }).favorites.hiddenGems).toEqual([]);
+    // 不是年度期間就不逐季拆。
+    const month = analyze({ entries: [], episodeRecords: [], scope: watchedScope() });
+    expect(month.favorites).toEqual({ seasons: [], hiddenGems: [] });
   });
 
   it("withholds preference when one authoritative episode in a relevant started group is missing", () => {

@@ -43,6 +43,7 @@ const apiValue = (videoSn = 49054): unknown => ({
       animeSn: 114010,
       title: "API title [9]",
       totalEpisode: 13,
+      flag: 0,
       seasonStart: "2026/04/02",
       seasonEnd: "2026/07/02",
       episodeIndex: 8,
@@ -180,7 +181,7 @@ test("MetadataService fetches, validates, and atomically persists episode plus a
   assert.equal(new Headers(requestInits[0]?.headers).get("accept"), "application/json");
   assert.equal(harness.storage.writes.length, 1);
   assert.equal(Object.hasOwn(harness.storage.values, unavailableMetadataCacheKey(49054)), false);
-  assert.equal((await readMetadataCache(harness.storage, 49054)).kind, "hit");
+  assert.equal((await readMetadataCache(harness.storage, 49054, new Date("2026-07-14T00:00:00.000Z"))).kind, "hit");
 });
 
 test("same epoch and videoSn share one in-flight request across callers", async () => {
@@ -480,6 +481,65 @@ test("real payloads that the first parser rejected now resolve and cache", async
     const first = await harness.service.resolveEpisode(videoSn);
     assert.deepEqual(await harness.service.resolveEpisode(videoSn), first, name);
     assert.equal(fetchCount, 1, name);
-    assert.equal((await readMetadataCache(harness.storage, videoSn)).kind, "hit", name);
+    assert.equal((await readMetadataCache(harness.storage, videoSn, new Date("2026-07-14T00:00:00.000Z"))).kind, "hit", name);
+  }
+});
+
+test("an expired anime catalog refreshes once and is shared by cached sibling episodes", async () => {
+  const oldTime = new Date("2026-07-13T00:00:00.000Z");
+  const now = new Date("2026-07-14T00:00:00.000Z");
+  const valueFor = (videoSn: number, ongoing: boolean) => {
+    const value = apiValue(videoSn) as { data: { anime: Record<string, unknown> } };
+    if (ongoing) value.data.anime.seasonEnd = "2100/12/31";
+    value.data.anime.episodes = {
+      "0": [
+        { episode: 9, videoSn: 49054, state: 0, cover: "" },
+        { episode: 10, videoSn: 49055, state: 0, cover: "" }
+      ]
+    };
+    return value;
+  };
+  const storage = new MemoryStorage({
+    ...metadataBundleCacheItems(parseMetadataResponse(valueFor(49054, false), 49054, oldTime)),
+    ...metadataBundleCacheItems(parseMetadataResponse(valueFor(49055, false), 49055, oldTime))
+  });
+  const requested: number[] = [];
+  const harness = createHarness({
+    storage,
+    now: () => now,
+    fetcher: async (url) => {
+      const videoSn = Number(new URL(url).searchParams.get("videoSn"));
+      requested.push(videoSn);
+      return new Response(JSON.stringify(valueFor(videoSn, true)));
+    }
+  });
+  assert.equal((await harness.service.resolveEpisode(49054)).anime.isOngoing, true);
+  const sibling = await harness.service.resolveEpisode(49055);
+  assert.equal(sibling.anime.isOngoing, true);
+  assert.equal(sibling.anime.fetchedAt.getTime(), now.getTime());
+  assert.equal(sibling.episode.fetchedAt.getTime(), oldTime.getTime());
+  assert.deepEqual(requested, [49054]);
+});
+
+test("persisting a response cannot replace a newer official anime snapshot", async () => {
+  const now = new Date("2026-07-14T00:00:00.000Z");
+  const future = new Date("2026-07-14T01:00:00.000Z");
+  const newerValue = apiValue() as { data: { anime: Record<string, unknown> } };
+  newerValue.data.anime.seasonEnd = "2100/12/31";
+  newerValue.data.anime.totalEpisode = 14;
+  const newerBundle = parseMetadataResponse(newerValue, 49054, future);
+  const storage = new MemoryStorage(metadataBundleCacheItems(newerBundle));
+  const harness = createHarness({
+    storage,
+    now: () => now,
+    fetcher: async () => new Response(JSON.stringify(apiValue()))
+  });
+  await harness.service.resolveEpisode(49054);
+  const preserved = await readMetadataCache(storage, 49054, future);
+  assert.equal(preserved.kind, "hit");
+  if (preserved.kind === "hit") {
+    assert.equal(preserved.bundle.anime.totalEpisode, 14);
+    assert.equal(preserved.bundle.anime.isOngoing, true);
+    assert.equal(preserved.bundle.anime.fetchedAt.getTime(), future.getTime());
   }
 });

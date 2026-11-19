@@ -48,6 +48,7 @@ const bundle = (): MetadataBundle => ({
     animeSn: 114010,
     apiTitle: "API title [9]",
     totalEpisode: 13,
+    isOngoing: false,
     seasonStartDateKey: "2026-04-02",
     seasonEndDateKey: "2026-07-02",
     coverUrl: "https://p2.bahamut.com.tw/anime.JPG",
@@ -129,7 +130,7 @@ test("v1 keys accept only exact typed positive safe integer identities", () => {
   assert.throws(() => episodeMetadataCacheKey(0));
 });
 
-test("metadata bundle wire round-trips exact v1 schema and deep dates", () => {
+test("metadata bundle wire round-trips strict schemas and deep dates", () => {
   const source = bundle();
   const wire = metadataBundleToWire(source);
   assert.equal(wire.episode.schemaVersion, 1);
@@ -145,7 +146,7 @@ test("metadata bundle wire round-trips exact v1 schema and deep dates", () => {
     episode: Record<string, unknown>;
   };
   extra.episode.extra = true;
-  assert.throws(() => parseMetadataBundleWire(extra), /schema v1/);
+  assert.throws(() => parseMetadataBundleWire(extra), /schema/);
 
   const wrongIdentity = structuredClone(wire) as unknown as {
     anime: { animeSn: number };
@@ -170,7 +171,7 @@ test("metadata bundle wire round-trips exact v1 schema and deep dates", () => {
     episode: Record<string, unknown>;
   };
   delete missingEpisodeGroup.episode.groupKey;
-  assert.throws(() => parseMetadataBundleWire(missingEpisodeGroup), /schema v1/);
+  assert.throws(() => parseMetadataBundleWire(missingEpisodeGroup), /schema/);
 
   const wrongEpisodeGroup = structuredClone(wire) as unknown as {
     episode: { groupKey: string };
@@ -183,7 +184,7 @@ test("readMetadataCache requires both exact episode and anime records", async ()
   const source = bundle();
   const items = metadataBundleCacheItems(source);
   const storage = new MemoryStorage(items);
-  const hit = await readMetadataCache(storage, source.episode.videoSn);
+  const hit = await readMetadataCache(storage, source.episode.videoSn, source.anime.fetchedAt);
   assert.equal(hit.kind, "hit");
   if (hit.kind === "hit") {
     assert.deepEqual(hit.bundle, source);
@@ -192,7 +193,7 @@ test("readMetadataCache requires both exact episode and anime records", async ()
 
   delete storage.values[animeMetadataCacheKey(source.anime.animeSn)];
   assert.deepEqual(
-    await readMetadataCache(storage, source.episode.videoSn),
+    await readMetadataCache(storage, source.episode.videoSn, source.anime.fetchedAt),
     { kind: "miss", previousUnavailable: null }
   );
 
@@ -201,13 +202,11 @@ test("readMetadataCache requires both exact episode and anime records", async ()
     kind: "episode",
     videoSn: source.episode.videoSn
   };
-  const invalid = await readMetadataCache(storage, source.episode.videoSn);
+  const invalid = await readMetadataCache(storage, source.episode.videoSn, source.anime.fetchedAt);
   assert.equal(invalid.kind, "invalid");
 });
 
-test("v1 cache records written before the relaxation still parse unchanged", () => {
-  const legacy = structuredClone(metadataBundleToWire(bundle()));
-  assert.deepEqual(parseMetadataBundleWire(legacy), bundle());
+test("cache preserves prologue and fractional episode labels", () => {
 
   const special = bundle();
   const relaxed: MetadataBundle = {
@@ -333,7 +332,7 @@ test("invalid-response records live 24 hours and only for the current parser ver
   assert.throws(() => createInvalidMetadata(1, "   ", observedAt));
   assert.throws(() => parseStoredInvalidMetadata(stored, 30726), /不一致/);
   assert.throws(() => parseStoredInvalidMetadata({ ...stored, parserVersion: 0 }, 30725));
-  assert.throws(() => parseStoredInvalidMetadata({ ...stored, extra: 1 }, 30725), /schema v1/);
+  assert.throws(() => parseStoredInvalidMetadata({ ...stored, extra: 1 }, 30725), /schema/);
 });
 
 test("lookup order: usable records, then fresh unavailable, then fresh invalid-response", async () => {
@@ -408,4 +407,43 @@ test("clearMetadataCache removes only owned v1 records and orphans", async () =>
   assert.deepEqual(storage.values, { [unrelated]: true, [similar]: true });
   assert.equal(await clearMetadataCache(storage), 0);
   assert.equal(storage.removals.length, 1);
+});
+
+test("anime catalogs expire exactly after one day while episode facts remain reusable", async () => {
+  const source = bundle();
+  const storage = new MemoryStorage(metadataBundleCacheItems(source));
+  const fetched = source.anime.fetchedAt.getTime();
+  assert.equal((await readMetadataCache(storage, source.episode.videoSn, new Date(fetched + 24 * HOUR - 1))).kind, "hit");
+  assert.equal((await readMetadataCache(storage, source.episode.videoSn, new Date(fetched + 24 * HOUR))).kind, "miss");
+  assert.equal((await readMetadataCache(storage, source.episode.videoSn, new Date(fetched - 1))).kind, "miss");
+
+  const refreshed = { ...source.anime, isOngoing: true, fetchedAt: new Date(fetched + 24 * HOUR) };
+  Object.assign(storage.values, metadataBundleCacheItems({ ...source, anime: refreshed }));
+  const lookup = await readMetadataCache(storage, source.episode.videoSn, refreshed.fetchedAt);
+  assert.equal(lookup.kind, "hit");
+  if (lookup.kind === "hit") {
+    assert.equal(lookup.bundle.anime.isOngoing, true);
+    assert.equal(lookup.bundle.episode.fetchedAt.getTime(), fetched);
+  }
+});
+
+test("stale positive catalogs do not hide a fresh unavailable answer", async () => {
+  const source = bundle();
+  const now = new Date(source.anime.fetchedAt.getTime() + 24 * HOUR);
+  const storage = new MemoryStorage({
+    ...metadataBundleCacheItems(source),
+    [unavailableMetadataCacheKey(source.episode.videoSn)]: createUnavailableMetadata(source.episode.videoSn, now)
+  });
+  assert.equal((await readMetadataCache(storage, source.episode.videoSn, now)).kind, "unavailable");
+});
+
+test("anime wire schema requires the official ongoing field and rejects obsolete records", () => {
+  const wire = metadataBundleToWire(bundle());
+  assert.equal(wire.anime.schemaVersion, 2);
+  assert.equal(wire.anime.isOngoing, false);
+  assert.throws(() => parseMetadataBundleWire({ ...wire, anime: { ...wire.anime, schemaVersion: 1 } }), /schema header/);
+  assert.throws(() => parseMetadataBundleWire({ ...wire, anime: { ...wire.anime, isOngoing: 0 } }), /boolean/);
+  const missing = { ...wire.anime } as Record<string, unknown>;
+  delete missing.isOngoing;
+  assert.throws(() => parseMetadataBundleWire({ ...wire, anime: missing }), /schema/);
 });

@@ -1,14 +1,17 @@
 import type {
   AnalyticsResult,
+  BingeRow,
   ClockSegment,
   CompletionRow,
   DimensionRow,
+  DropTagRow,
+  HiddenGemRow,
   PreferenceRow,
   SeasonBreakdownRow,
   SeriesRuntimeRow,
   TimelinessRow
 } from "../analytics";
-import { formatClockHour, formatHourRange, formatInteger, formatPercent, truncateText } from "../analysis-format";
+import { formatClockHour, formatEpisodesPerDay, formatHourRange, formatInteger, formatPercent, truncateText } from "../analysis-format";
 import {
   analysisScopeKey,
   type AnalysisAxis,
@@ -21,7 +24,7 @@ import { buildRecapSummary, type RecapSummaryPayload } from "./recap-summary";
 
 /** Story titles weave work titles into sentences; clamp them so one runaway title can't take over the stage. */
 const STORY_TITLE_LIMIT = 20;
-const RECAP_SCHEMA_VERSION = 6;
+const RECAP_SCHEMA_VERSION = 9;
 const MAX_RANKED_ROWS = 5;
 const SEASON_ORDER: readonly CalendarSeason[] = ["winter", "spring", "summer", "autumn"];
 
@@ -60,6 +63,7 @@ export type RecapChapterKind =
   | "behavior-preference"
   | "taste"
   | "completion"
+  | "binge"
   | "platform-taste";
 
 type RecapChapterBase<Kind extends RecapChapterKind, Payload> = RecapChapter & {
@@ -158,9 +162,20 @@ export type PreferenceAnimePayload = Pick<
   | "decisionBucketCount"
 >;
 
+export type SeasonFavoritesPayload = {
+  readonly year: number;
+  readonly season: CalendarSeason;
+  /** 「冬季」這類短名，年份由期間本身交代。 */
+  readonly label: string;
+  /** 前幾名；這季時刻太少、看不出偏心誰時為空。 */
+  readonly rows: readonly PreferenceAnimePayload[];
+};
+
 export type BehaviorPreferencePayload = {
   readonly choiceEventCount: number;
   readonly rows: readonly PreferenceAnimePayload[];
+  /** 年度回顧逐季的最愛（已開始的季）；其他期間為空。 */
+  readonly seasons: readonly SeasonFavoritesPayload[];
 };
 
 export type BehaviorPreferenceChapter = RecapChapterBase<
@@ -220,36 +235,57 @@ export type MarathonChapter = RecapChapterBase<"marathon", MarathonPayload>;
 
 export type CompletionPayloadRow = Pick<
   CompletionRow,
-  "animeSn" | "title" | "coverUrl" | "watchedEpisodeCount" | "totalEpisode" | "ratio"
+  "animeSn" | "title" | "coverUrl" | "watchedEpisodeCount" | "totalEpisode" | "ratio" | "isOngoing"
 >;
 
+export type DropTagPayload = Pick<DropTagRow, "label" | "startedCount" | "droppedCount" | "dropRate">;
+
+/** 追番成績單：只算從第 1 集開始看、已完結的作品，還在播的另外算。 */
 export type CompletionPayload = {
-  /** Anime with a verifiable contiguous episode structure inside the window. */
-  readonly sampledCount: number;
-  readonly completedCount: number;
-  /** Works the user opened exactly once and never came back to (of >1 total episodes). */
+  /** 看完＋差一點看完＋半途停下＋放棄。 */
+  readonly startedCount: number;
+  readonly finishedCount: number;
+  readonly nearlyCount: number;
+  readonly midwayCount: number;
+  readonly droppedCount: number;
+  /** 放棄的作品裡只看了第 1 集的。 */
   readonly tastedCount: number;
-  readonly rows: readonly CompletionPayloadRow[];
+  /** Still-airing anime with a verifiable structure; their episode total is only what has aired. */
+  readonly airingCount: number;
+  /** Still-airing anime watched up to the latest aired episode. */
+  readonly caughtUpCount: number;
+  /** 差一點看完的作品，差得最少的在前，最多三部。 */
+  readonly nearlyRows: readonly CompletionPayloadRow[];
+  /** 放棄比例明顯高於整體的類型；不明顯時為 null。 */
+  readonly mostDroppedTag: DropTagPayload | null;
+  /** 放棄比例明顯低於整體的類型；不明顯時為 null。 */
+  readonly leastDroppedTag: DropTagPayload | null;
+  /** 開始看的作品夠多的類型，放棄比例高的在前；全部列出，最能看完的一端才不會被截掉。 */
+  readonly tagDrops: readonly DropTagPayload[];
 };
 
 export type CompletionChapter = RecapChapterBase<"completion", CompletionPayload>;
 
-export type PlatformTastePayloadRow = {
-  readonly animeSn: number;
-  readonly title: string;
-  readonly coverUrl: string | null;
-  readonly personalWatchRank: number;
-  readonly personalWatchCount: number;
-  readonly platformRank: number;
-  readonly platformPopular: number;
-  /** Positive when the user ranks the work higher than the platform crowd does. */
-  readonly gap: number;
+export type BingePayloadRow = Pick<
+  BingeRow,
+  "rank" | "animeSn" | "title" | "coverUrl" | "episodesPerDay"
+>;
+
+export type BingePayload = {
+  readonly completedCount: number;
+  readonly rows: readonly BingePayloadRow[];
+};
+
+export type BingeChapter = RecapChapterBase<"binge", BingePayload>;
+
+export type HiddenGemPayload = HiddenGemRow & {
+  /** 開播季，例如「2026 夏季」。 */
+  readonly cohortLabel: string;
 };
 
 export type PlatformTastePayload = {
-  readonly rows: readonly PlatformTastePayloadRow[];
-  readonly hiddenGem: PlatformTastePayloadRow | null;
-  readonly averageGap: number;
+  /** 一到兩部，最冷門的在前。 */
+  readonly gems: readonly HiddenGemPayload[];
 };
 
 export type PlatformTasteChapter = RecapChapterBase<"platform-taste", PlatformTastePayload>;
@@ -264,6 +300,7 @@ export type RecapPresentationChapter =
   | BehaviorPreferenceChapter
   | TasteChapter
   | CompletionChapter
+  | BingeChapter
   | PlatformTasteChapter;
 
 export type RecapOmissionReason =
@@ -277,7 +314,8 @@ export type RecapOmissionReason =
   | "no-habit-clock"
   | "no-marathon"
   | "no-completion-structure"
-  | "no-platform-snapshot";
+  | "no-binge-completions"
+  | "no-hidden-gem";
 
 export type RecapChapterOmission = {
   readonly chapter: RecapChapterKind;
@@ -319,6 +357,7 @@ export const buildRecapDeck = (result: AnalyticsResult): RecapPresentationDeck =
   appendRuntime(result, chapters, omissions);
   appendTaste(result, chapters, omissions);
   appendCompletion(result, chapters, omissions);
+  appendBinge(result, chapters, omissions);
   appendTimeliness(result, chapters, omissions);
   appendPreference(result, chapters, omissions);
   appendPlatformTaste(result, chapters, omissions);
@@ -441,8 +480,8 @@ const appendSeasonBreakdown = (
     title,
     eyebrow: `${period.year} 年四季`,
     narrative: leadingRows.length === 1
-      ? `${formatInteger(leader.watchCount)} 次觀看，來自 ${formatInteger(leader.animeCount)} 部作品。`
-      : `各有 ${formatInteger(leader.watchCount)} 次觀看。`,
+      ? `${formatInteger(leader.watchCount)} 集，來自 ${formatInteger(leader.animeCount)} 部作品。`
+      : `各看了 ${formatInteger(leader.watchCount)} 集。`,
     evidence: [
       ...rows.map((row) => countEvidence(row.label, row.watchCount, "watch"))
     ],
@@ -524,7 +563,7 @@ const appendMarathon = (
     narrative: narrativeParts.join(""),
     evidence: [
       countEvidence(`單日最高（${dateKeyLabel(peakDay.dateKey)}）`, peakDay.watchCount, "watch"),
-      ...(peakDay.knownContentMinutes > 0 ? [minutesEvidence("當日已知片長", peakDay.knownContentMinutes)] : []),
+      ...(peakDay.knownContentMinutes > 0 ? [minutesEvidence("當天觀看時間", peakDay.knownContentMinutes)] : []),
       ...(streak ? [countEvidence(`最長連續（${dateKeyLabel(streak.fromDateKey)} 起）`, streak.days, "day")] : []),
       ...(run ? [countEvidence(`單日單作品最多：${run.title}`, run.watchCount, "episode")] : [])
     ],
@@ -536,44 +575,140 @@ const appendMarathon = (
   });
 };
 
+/** 類型的放棄比例要比整體高（低）這麼多倍，才值得說「最常放棄」「最能看完」。 */
+const DROP_TAG_HIGH_FACTOR = 1.3;
+const DROP_TAG_LOW_FACTOR = 0.7;
+const DROP_TAG_MIN_DROPPED = 3;
+const MAX_NEARLY_ROWS = 3;
+
 const appendCompletion = (
   result: AnalyticsResult,
   chapters: RecapPresentationChapter[],
   omissions: RecapChapterOmission[]
 ): void => {
   const rows = result.completion.rows;
-  if (!result.completion.available || rows.length === 0) {
-    omit(omissions, "completion", "no-completion-structure", "目前沒有可核對完整集數結構的作品。");
+  const count = (outcome: CompletionRow["outcome"]): number => rows.filter((row) => row.outcome === outcome).length;
+  const finishedCount = count("finished");
+  const nearlyCount = count("nearly");
+  const midwayCount = count("midway");
+  const droppedCount = count("dropped");
+  const startedCount = finishedCount + nearlyCount + midwayCount + droppedCount;
+  const caughtUpCount = count("caught-up");
+  const airingCount = caughtUpCount + count("behind");
+  if (!result.completion.available || startedCount + airingCount === 0) {
+    omit(omissions, "completion", "no-completion-structure", "這段期間沒有從第 1 集開始看、集數能一一對上的作品。");
     return;
   }
-  const completed = rows.filter((row) => row.ratio >= 1);
-  const tasted = rows.filter((row) => row.watchedEpisodeCount === 1 && row.totalEpisode > 1);
-  const leader = rows[0]!;
-  const title = completed.length > 0
-    ? `你把 ${formatInteger(completed.length)} 部作品完整追完`
-    : `你把《${truncateText(leader.title, STORY_TITLE_LIMIT)}》追到了 ${formatPercent(leader.ratio)}`;
-  const narrative = completed.length > 0
-    ? `可核對集數的 ${formatInteger(rows.length)} 部作品裡${tasted.length > 0 ? `，另外有 ${formatInteger(tasted.length)} 部只淺嚐了一集` : "，一集不漏"}。`
-    : `在這段期間內，可核對集數的作品共 ${formatInteger(rows.length)} 部。`;
+  const tastedCount = rows.filter((row) => row.outcome === "dropped" && row.watchedEpisodeCount === 1).length;
+  const nearlyRows = rows
+    .filter((row) => row.outcome === "nearly")
+    .sort((left, right) => (left.totalEpisode - left.watchedEpisodeCount) - (right.totalEpisode - right.watchedEpisodeCount)
+      || right.ratio - left.ratio
+      || left.animeSn - right.animeSn)
+    .slice(0, MAX_NEARLY_ROWS)
+    .map(copyCompletionRow);
+  // 類型的放棄比例只有和整體差得夠多才說：每個類型都差不多時，硬挑一個只是雜訊。
+  const overallDropRate = startedCount > 0 ? droppedCount / startedCount : 0;
+  const tags = result.completion.dropTags;
+  const most = tags[0];
+  const least = tags.at(-1);
+  const mostDroppedTag = most && most.droppedCount >= DROP_TAG_MIN_DROPPED && most.dropRate >= overallDropRate * DROP_TAG_HIGH_FACTOR
+    ? copyDropTag(most)
+    : null;
+  const leastDroppedTag = least && least !== most && least.dropRate <= overallDropRate * DROP_TAG_LOW_FACTOR
+    ? copyDropTag(least)
+    : null;
+
+  const title = finishedCount > 0
+    ? `你把 ${formatInteger(finishedCount)} 部作品從頭看到尾`
+    : startedCount > 0
+      ? `從頭開始看的 ${formatInteger(startedCount)} 部作品，還沒有一部看完`
+      : caughtUpCount > 0
+        ? `還在播的作品裡，你有 ${formatInteger(caughtUpCount)} 部追到最新一集`
+        : `還在播的 ${formatInteger(airingCount)} 部作品，你都還在追`;
+  const narrative = startedCount === 0
+    ? "這段期間看的作品都還在播，要等完結才算得出看完了沒。"
+    : `從第 1 集開始看、已完結的 ${formatInteger(startedCount)} 部作品裡，有 ${formatPercent(finishedCount / startedCount)} 一集不漏。`;
   chapters.push({
     id: "completion",
     kind: "completion",
     title,
-    eyebrow: "完食清單",
+    eyebrow: "追番成績單",
     narrative,
     evidence: [
-      textEvidence("統計方式", "只統計期間內能核對完整集數結構的作品；完成度以本期間看過的不同集數計。"),
-      countEvidence("可核對的作品", rows.length, "anime"),
-      countEvidence("完整看完", completed.length, "anime"),
-      countEvidence("只看了一集", tasted.length, "anime"),
-      ...rows.slice(0, 3).map((row) =>
-        ratioEvidence(row.title, row.watchedEpisodeCount, row.totalEpisode, row.ratio))
+      textEvidence("怎麼分類", "只算從第 1 集開始看、已經播完的作品：每一集都看了算「看完」；只差最後一兩集算「差一點看完」；看了一半以上、但還差三集以上算「半途停下」；看不到一半算「放棄」。第 1 集不在紀錄裡的作品分不出是哪一種，不列入。"),
+      textEvidence("還在播的作品", "只算到目前已播的集數，看到最新一集算「追到最新」，不算進看完。"),
+      textEvidence("統計範圍", result.scope.axis === "watched-at"
+        ? "統計期間內出現、集數能一一對上的作品；看過的集數累計到本期結束。"
+        : "統計上架期間內出現、集數能一一對上的作品；看過的集數依觀看紀錄累計。"),
+      countEvidence("看完", finishedCount, "anime"),
+      countEvidence("差一點看完", nearlyCount, "anime"),
+      countEvidence("半途停下", midwayCount, "anime"),
+      countEvidence("放棄", droppedCount, "anime"),
+      ...(airingCount > 0 ? [countEvidence("還在播、追到最新", caughtUpCount, "anime")] : []),
+      ...tags.slice(0, 3).map((tag) => textEvidence(
+        `類型：${tag.label}`,
+        `${formatInteger(tag.startedCount)} 部裡放棄 ${formatInteger(tag.droppedCount)} 部`
+      ))
     ],
     payload: {
-      sampledCount: rows.length,
-      completedCount: completed.length,
-      tastedCount: tasted.length,
-      rows: rows.slice(0, 4).map(copyCompletionRow)
+      startedCount,
+      finishedCount,
+      nearlyCount,
+      midwayCount,
+      droppedCount,
+      tastedCount,
+      airingCount,
+      caughtUpCount,
+      nearlyRows,
+      mostDroppedTag,
+      leastDroppedTag,
+      tagDrops: tags.map(copyDropTag)
+    }
+  });
+};
+
+const copyDropTag = (tag: DropTagRow): DropTagPayload => ({
+  label: tag.label,
+  startedCount: tag.startedCount,
+  droppedCount: tag.droppedCount,
+  dropRate: tag.dropRate
+});
+
+const appendBinge = (
+  result: AnalyticsResult,
+  chapters: RecapPresentationChapter[],
+  omissions: RecapChapterOmission[]
+): void => {
+  const { available, rows } = result.binge;
+  const leader = rows[0];
+  if (result.scope.axis !== "watched-at" || !available || !leader) {
+    omit(omissions, "binge", "no-binge-completions", "這段期間沒有可呈現的單季補番紀錄。");
+    return;
+  }
+  chapters.push({
+    id: "binge",
+    kind: "binge",
+    title: `補番速度最快的是《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
+    eyebrow: "補番紀錄",
+    narrative: `這段期間補完了 ${formatInteger(rows.length)} 部。`,
+    evidence: [
+      textEvidence("統計方式", `依每部作品的平均每天集數排序，以補完日期歸入本期。日均集數＝該部集數 ÷ 含首尾的日期跨度，包含中間未觀看的日子，採${result.scope.dayBoundaryMode === "thirty-hour" ? "早上 06:00" : "午夜 00:00"}換日。`),
+      countEvidence("本期補完", rows.length, "anime"),
+      ...rows.slice(0, MAX_RANKED_ROWS).map((row) => textEvidence(
+        row.title,
+        `平均 ${formatEpisodesPerDay(row.episodesPerDay)}`
+      ))
+    ],
+    payload: {
+      completedCount: rows.length,
+      rows: rows.slice(0, MAX_RANKED_ROWS).map((row) => ({
+        rank: row.rank,
+        animeSn: row.animeSn,
+        title: row.title,
+        coverUrl: row.coverUrl,
+        episodesPerDay: row.episodesPerDay
+      }))
     }
   });
 };
@@ -583,44 +718,38 @@ const appendPlatformTaste = (
   chapters: RecapPresentationChapter[],
   omissions: RecapChapterOmission[]
 ): void => {
-  const comparison = result.currentPlatformSnapshotComparison;
-  if (!comparison.available || comparison.rows.length < 2) {
-    omit(omissions, "platform-taste", "no-platform-snapshot", "目前平台人氣快照的資料不足以做對照。");
+  const gems = result.favorites.hiddenGems.map((gem): HiddenGemPayload => ({
+    ...gem,
+    cohortLabel: `${gem.cohortYear} ${SEASON_LABEL[gem.cohortSeason]}`
+  }));
+  const gem = gems[0];
+  if (!gem) {
+    omit(omissions, "platform-taste", "no-hidden-gem", "這段期間沒有你特別偏心、同季又比較少人看的作品。");
     return;
   }
-  const rows = comparison.rows.slice(0, MAX_RANKED_ROWS).map((row): PlatformTastePayloadRow => ({
-    animeSn: row.animeSn,
-    title: row.title,
-    coverUrl: row.coverUrl,
-    personalWatchRank: row.personalWatchRank,
-    personalWatchCount: row.personalWatchCount,
-    platformRank: row.platformPopularityRankWithinCoveredAnime,
-    platformPopular: row.platformPopular,
-    gap: row.platformPopularityRankWithinCoveredAnime - row.personalWatchRank
-  }));
-  const hiddenGem = rows.reduce<PlatformTastePayloadRow | null>(
-    (best, row) => row.gap > (best?.gap ?? 0) ? row : best,
-    null
-  );
-  const averageGap = rows.reduce((sum, row) => sum + row.gap, 0) / rows.length;
   chapters.push({
     id: "platform-taste",
     kind: "platform-taste",
-    title: hiddenGem
-      ? `《${truncateText(hiddenGem.title, STORY_TITLE_LIMIT)}》是你的私藏`
-      : "你的口味和平台幾乎同步",
-    eyebrow: "和平台比一比",
-    narrative: hiddenGem
-      ? `它在你的排行是第 ${formatInteger(hiddenGem.personalWatchRank)} 名，平台人氣卻只排第 ${formatInteger(hiddenGem.platformRank)} 名。`
-      : "你最常看的，平台上的大家也在看。",
+    title: `《${truncateText(gem.title, STORY_TITLE_LIMIT)}》是你的私藏`,
+    eyebrow: "你的私藏",
+    narrative: `有得選時你常常先點開它；但 ${gem.cohortLabel}開播、你也看過的 ${formatInteger(gem.cohortSize)} 部作品裡，它的人氣只排第 ${formatInteger(gem.popularityRank)}。`,
     evidence: [
-      textEvidence("統計方式", "以目前平台人氣快照，和你在這段期間的觀看排行對照。"),
-      ...rows.slice(0, 4).map((row) =>
-        textEvidence(row.title, `你 #${formatInteger(row.personalWatchRank)}・平台 #${formatInteger(row.platformRank)}`))
+      textEvidence("怎麼選出來", "從有得選時最先看的作品裡，挑出已經播完、人氣排在同季開播作品後三分之一的作品。人氣是動畫瘋目前的累積人氣，只和同一季開播、你在這段期間也看過的作品比。"),
+      ...gems.map((row) => textEvidence(
+        row.title,
+        `${row.cohortLabel}的 ${formatInteger(row.cohortSize)} 部裡人氣第 ${formatInteger(row.popularityRank)}・約《${truncateText(row.cohortLeaderTitle, STORY_TITLE_LIMIT)}》的 ${formatPercent(row.popularityRatio)}`
+      ))
     ],
-    payload: { rows, hiddenGem, averageGap }
+    payload: { gems }
   });
 };
+
+const SEASON_LABEL: Readonly<Record<CalendarSeason, string>> = Object.freeze({
+  winter: "冬季",
+  spring: "春季",
+  summer: "夏季",
+  autumn: "秋季"
+});
 
 const copyCompletionRow = (row: CompletionRow): CompletionPayloadRow => ({
   animeSn: row.animeSn,
@@ -628,7 +757,8 @@ const copyCompletionRow = (row: CompletionRow): CompletionPayloadRow => ({
   coverUrl: row.coverUrl,
   watchedEpisodeCount: row.watchedEpisodeCount,
   totalEpisode: row.totalEpisode,
-  ratio: row.ratio
+  ratio: row.ratio,
+  isOngoing: row.isOngoing
 });
 
 const appendRuntime = (
@@ -667,9 +797,9 @@ const appendRuntime = (
   chapters.push({
     id: "runtime",
     kind: "runtime",
-    title: `片長最長的是《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
-    eyebrow: "觀看片長排行",
-    narrative: `${formatMinutes(leader.contentMinutes)}；觀看片長合計 ${formatMinutes(result.summary.knownContentMinutes)}。`,
+    title: `陪你最久的是《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
+    eyebrow: "陪你最久的作品",
+    narrative: `${formatMinutes(leader.contentMinutes)}；這段期間的觀看時間合計 ${formatMinutes(result.summary.knownContentMinutes)}。`,
     evidence: [
       ratioEvidence(
         "片長資料涵蓋",
@@ -677,7 +807,7 @@ const appendRuntime = (
         result.summary.durationCoverage.denominator,
         result.summary.durationCoverage.ratio
       ),
-      minutesEvidence("觀看片長合計", result.summary.knownContentMinutes),
+      minutesEvidence("觀看時間合計", result.summary.knownContentMinutes),
       ...rows.slice(0, 3).map((row) => minutesEvidence(row.title, row.contentMinutes)),
       ...(longestPayload
         ? [minutesEvidence(`最長單集：${longestPayload.title} ${longestPayload.episode}`, longestPayload.durationMinutes)]
@@ -754,38 +884,54 @@ const appendPreference = (
       omissions,
       "behavior-preference",
       "insufficient-preference",
-      "目前可比較的待看選擇還不足以形成行為偏好排行。"
+      "好幾部作品同時有新集數在等你的時候還不夠多，看不出你偏心哪一部。"
     );
     return;
   }
   const rows = result.preference.rows.slice(0, MAX_RANKED_ROWS).map(copyPreferenceRow);
   const leader = rows[0];
   if (!leader) return;
+  const seasons = result.favorites.seasons.map((season): SeasonFavoritesPayload => ({
+    year: season.year,
+    season: season.season,
+    label: SEASON_LABEL[season.season],
+    rows: season.rows.map(copyPreferenceRow)
+  }));
+  const pickedSeasons = seasons.filter((season) => season.rows.length > 0);
   chapters.push({
     id: "behavior-preference",
     kind: "behavior-preference",
-    title: `有得選時，你最常先看《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
+    title: pickedSeasons.length >= 2
+      ? "每一季，你最先點開的作品"
+      : `有得選時，你最常先看《${truncateText(leader.title, STORY_TITLE_LIMIT)}》`,
     eyebrow: "你的選擇",
-    narrative: `${formatInteger(leader.comparisons)} 次比較裡，你有 ${formatInteger(leader.wins)} 次先看它。`,
+    narrative: pickedSeasons.length >= 2
+      ? `好幾部作品同時有新集數在等你時，你常常先點開這幾部；整段期間最偏心的是《${truncateText(leader.title, STORY_TITLE_LIMIT)}》。`
+      : `好幾部作品同時有新集數在等你時，${formatPercent(leader.rawWinRate)} 的時候你先點開它。`,
     evidence: [
       textEvidence("比較方式", "只比較你已經開始追、當時都有新集數可看的作品。"),
       ratioEvidence(
-        "可建立選擇情境的觀看",
+        "看得出有得選的觀看",
         result.preference.coverage.numerator,
         result.preference.coverage.denominator,
         result.preference.coverage.ratio
       ),
-      countEvidence("可比較的選擇時刻", result.preference.choiceEventCount, "choice"),
+      countEvidence("有得選的時刻", result.preference.choiceEventCount, "choice"),
       ...rows.slice(0, 3).map((row) => ratioEvidence(
         row.title,
         row.wins,
         row.comparisons,
         row.rawWinRate
+      )),
+      ...pickedSeasons.map((season) => textEvidence(
+        `${season.year} ${season.label}`,
+        season.rows.map((row) => `《${truncateText(row.title, STORY_TITLE_LIMIT)}》`).join("、")
       ))
     ],
     payload: {
       choiceEventCount: result.preference.choiceEventCount,
-      rows
+      rows,
+      seasons
     }
   });
 };
@@ -816,7 +962,7 @@ const appendTaste = (
     kind: "taste",
     title: `「${truncateText(leader.label, 16)}」最常出現在你的片單`,
     eyebrow: `最常看的${leaderKind}`,
-    narrative: `共 ${formatInteger(leader.watchCount)} 次觀看。`,
+    narrative: `你看的 ${formatInteger(result.catalog.animeCoverage.numerator)} 部作品裡，有 ${formatInteger(leader.animeCount)} 部。`,
     evidence: [
       ratioEvidence(
         "作品資料涵蓋",
@@ -824,10 +970,11 @@ const appendTaste = (
         result.catalog.animeCoverage.denominator,
         result.catalog.animeCoverage.ratio
       ),
-      ...tags.slice(0, 3).map((row) => countEvidence(`類型：${row.label}`, row.watchCount, "watch")),
-      ...makers.slice(0, 3).map((row) => countEvidence(`製作方：${row.label}`, row.watchCount, "watch")),
-      ...directors.slice(0, 3).map((row) => countEvidence(`導演：${row.label}`, row.watchCount, "watch")),
-      ...publishers.slice(0, 3).map((row) => countEvidence(`代理商：${row.label}`, row.watchCount, "watch"))
+      textEvidence("排名方式", "依作品數排名，同數時再比看過的集數；一部作品可以同時屬於好幾個類型。"),
+      ...tags.slice(0, 3).map((row) => countEvidence(`類型：${row.label}`, row.animeCount, "anime")),
+      ...makers.slice(0, 3).map((row) => countEvidence(`動畫公司：${row.label}`, row.animeCount, "anime")),
+      ...directors.slice(0, 3).map((row) => countEvidence(`導演：${row.label}`, row.animeCount, "anime")),
+      ...publishers.slice(0, 3).map((row) => countEvidence(`代理商：${row.label}`, row.animeCount, "anime"))
     ],
     payload: {
       tags,

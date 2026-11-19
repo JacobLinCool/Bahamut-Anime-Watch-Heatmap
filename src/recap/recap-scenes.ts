@@ -3,6 +3,7 @@ import {
   formatClockHour,
   formatCompactDuration,
   formatDuration,
+  formatEpisodesPerDay,
   formatHourRange,
   formatInteger,
   formatLag,
@@ -11,9 +12,11 @@ import {
 } from "../analysis-format";
 import { createButton, createCover, element, textElement } from "../view-dom";
 import type {
+  CompletionPayload,
   RecapEvidenceRow,
   RecapPresentationChapter,
-  RecapPresentationDeck
+  RecapPresentationDeck,
+  SeasonFavoritesPayload
 } from "./recap-deck";
 import type { RecapTone } from "./recap-palette";
 import { recapTitleFor } from "./recap-summary";
@@ -139,9 +142,9 @@ const decimal = new Intl.NumberFormat("zh-TW", { maximumFractionDigits: 1 });
 
 /** 平均次數（小數一位）也跟著旁邊的整數一起跳，不會先停在最終值等別人。 */
 export const densitySegment = (count: number, per: number): QuantitySegment => {
-  if (!(per > 0)) return { value: "—", unit: "次" };
+  if (!(per > 0)) return { value: "—", unit: "集" };
   const value = Math.round((count / per) * 10) / 10;
-  return { value: decimal.format(value), unit: "次", countTo: value, countFormat: "decimal" };
+  return { value: decimal.format(value), unit: "集", countTo: value, countFormat: "decimal" };
 };
 
 export const meterBar = (level: number, className = "ani-rc-meter"): HTMLElement => {
@@ -227,10 +230,10 @@ export const buildIntroScene = (context: RecapSceneContext): RecapSceneHandle =>
     const ledeText = input.liveDeck.chapters.length === 0
       ? "這段期間沒有觀看紀錄。"
       : result.summary.animeCount === 0
-        ? `${formatInteger(result.summary.watchCount)} 次觀看。作品資料補齊後，還會看到你最常看什麼、又先選了誰。`
+        ? `${formatInteger(result.summary.watchCount)} 集。作品資料補齊後，還會看到你最常看什麼、又先選了誰。`
         : result.scope.axis === "released-at"
-          ? `${formatInteger(result.summary.watchCount)} 次觀看，來自這段期間上架的 ${formatInteger(result.summary.animeCount)} 部作品。看看你最常看哪一季，又先選了誰。`
-          : `${formatInteger(result.summary.watchCount)} 次觀看，來自 ${formatInteger(result.summary.animeCount)} 部作品。看看你最常看什麼，又先選了誰。`;
+          ? `${formatInteger(result.summary.watchCount)} 集，來自這段期間上架的 ${formatInteger(result.summary.animeCount)} 部作品。看看你最常看哪一季，又先選了誰。`
+          : `${formatInteger(result.summary.watchCount)} 集，來自 ${formatInteger(result.summary.animeCount)} 部作品。看看你最常看什麼，又先選了誰。`;
     if (lede.dataset.text !== ledeText) {
       lede.dataset.text = ledeText;
       lede.replaceChildren();
@@ -372,11 +375,14 @@ export const chapterCoverUrls = (chapter: RecapPresentationChapter): readonly st
     case "runtime":
     case "timeliness":
     case "behavior-preference":
-    case "completion":
+    case "binge":
       for (const row of chapter.payload.rows) urls.push(row.coverUrl);
       break;
+    case "completion":
+      for (const row of chapter.payload.nearlyRows) urls.push(row.coverUrl);
+      break;
     case "platform-taste":
-      for (const row of chapter.payload.rows) urls.push(row.coverUrl);
+      for (const gem of chapter.payload.gems) urls.push(gem.coverUrl);
       break;
     default: break;
   }
@@ -469,10 +475,10 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
       // 沒有重看時「觀看」和「不同單集」是同一個數字，重複的卡片換成日均密度。
       const rewatchCount = payload.watchCount - payload.uniqueEpisodeCount;
       const grid = element("div", "ani-rc-stat-grid");
-      const watchStat = statCell("觀看", [{ value: formatInteger(payload.watchCount), unit: "次", countTo: payload.watchCount, countKey: "watch-count" }], next(), "metric-watch");
+      const watchStat = statCell("看了", [{ value: formatInteger(payload.watchCount), unit: "集", countTo: payload.watchCount, countKey: "watch-count" }], next(), "metric-watch");
       const secondStat = rewatchCount > 0
         ? statCell("重看", [{ value: formatInteger(rewatchCount), unit: "次", countTo: rewatchCount }], next())
-        : statCell(`平均每個${activeDayLabel}`, [densitySegment(payload.watchCount, payload.activeDayCount)], next());
+        : statCell(payload.axis === "released-at" ? "有上架的日子平均" : "有看的日子平均", [densitySegment(payload.watchCount, payload.activeDayCount)], next());
       // 作品資料還沒到時辨識不出作品：改放不同單集，而不是顯示「0 部」。
       const workStat = payload.identifiableAnimeCount > 0
         ? statCell("作品", [{ value: formatInteger(payload.identifiableAnimeCount), unit: "部", countTo: payload.identifiableAnimeCount, countKey: "anime-count" }], next(), "metric-anime")
@@ -503,7 +509,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
         column.append(
           track,
           textElement("span", "ani-rc-season-name", row.label),
-          quantity([{ value: formatInteger(row.watchCount), unit: "次", countTo: row.watchCount }], "ani-rc-season-count"),
+          quantity([{ value: formatInteger(row.watchCount), unit: "集", countTo: row.watchCount }], "ani-rc-season-count"),
           textElement("span", "ani-rc-season-detail", `${formatInteger(row.animeCount)} 部作品`)
         );
         chart.append(column);
@@ -527,7 +533,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
         bar.dataset.rcBar = "true";
         bar.style.setProperty("--rc-level", String(count / max));
         bar.dataset.peak = String(hour === payload.peakHour);
-        bar.title = `${hour}:00 · ${formatInteger(count)} 次`;
+        bar.title = `${hour}:00 · ${formatInteger(count)} 集`;
         bars.append(bar);
       });
       const labels = element("div", "ani-rc-clock-labels");
@@ -573,7 +579,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
         ));
       }
       if (peakDay.knownContentMinutes > 0) {
-        facts.push(factCell("當日已知片長", durationSegments(peakDay.knownContentMinutes), "只計入有片長資料的單集"));
+        facts.push(factCell("當天觀看時間", durationSegments(peakDay.knownContentMinutes)));
       }
       if (facts.length > 0) {
         const row = part("div", "ani-rc-marathon-facts", "rise", next());
@@ -599,7 +605,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
       const maxMinutes = Math.max(1, ...payload.rows.map((row) => row.contentMinutes));
       const visual: HTMLElement[] = [heroStat(
         durationSegments(payload.totalContentMinutes, "runtime-total"),
-        "觀看片長合計（只計入已知片長）",
+        "觀看時間合計",
         next(),
         "metric-runtime"
       )];
@@ -609,7 +615,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
         title: row.title,
         coverUrl: row.coverUrl,
         value: formatCompactDuration(row.contentMinutes),
-        meta: `${formatInteger(row.watchCount)} 次觀看`,
+        meta: `${formatInteger(row.watchCount)} 集`,
         level: row.contentMinutes / maxMinutes
       })), next));
       if (payload.longestEpisode) {
@@ -625,7 +631,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
               title: leader.title,
               coverUrl: leader.coverUrl,
               label: "片長第 1",
-              value: `${formatCompactDuration(leader.contentMinutes)} · ${formatInteger(leader.watchCount)} 次觀看`,
+              value: `${formatCompactDuration(leader.contentMinutes)} · ${formatInteger(leader.watchCount)} 集`,
               level: leader.contentMinutes / maxMinutes
             }
           : null,
@@ -666,9 +672,12 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
     case "behavior-preference": {
       const payload = chapter.payload;
       const leader = payload.rows[0];
+      if (payload.seasons.filter((season) => season.rows.length > 0).length >= 2) {
+        return { lead: null, visual: [seasonPicks(payload.seasons, next)], variant: "wide-visual" };
+      }
       const visual: HTMLElement[] = [heroStat(
         [{ value: formatInteger(payload.choiceEventCount), unit: "次", countTo: payload.choiceEventCount }],
-        "可以比較的選擇時刻",
+        "好幾部作品同時有新集數在等你",
         next()
       )];
       visual.push(...rankingList(payload.rows.slice(1, 5).map((row) => ({
@@ -677,7 +686,7 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
         title: row.title,
         coverUrl: row.coverUrl,
         value: formatPercent(row.rawWinRate),
-        meta: `${formatInteger(row.wins)} 次先看／${formatInteger(row.comparisons)} 次比較`,
+        meta: `${formatInteger(row.decisionBucketCount)} 次有得選`,
         level: row.rawWinRate
       })), next));
       return {
@@ -686,8 +695,8 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
               animeSn: leader.animeSn,
               title: leader.title,
               coverUrl: leader.coverUrl,
-              label: "行為偏好排行第 1",
-              value: `${formatInteger(leader.comparisons)} 次比較中，${formatInteger(leader.wins)} 次先看它 · ${formatPercent(leader.rawWinRate)}`,
+              label: "有得選時最先看",
+              value: `${formatPercent(leader.rawWinRate)} 的時候先看它 · ${formatInteger(leader.decisionBucketCount)} 次有得選`,
               level: leader.rawWinRate
             }
           : null,
@@ -696,77 +705,109 @@ const chapterLayout = (chapter: RecapPresentationChapter, next: () => number): C
     }
     case "completion": {
       const payload = chapter.payload;
-      const leader = payload.rows[0];
-      const visual: HTMLElement[] = [payload.completedCount > 0
+      // 只有還在播的作品時，主數字改說「追到最新」：已播集數看完不等於看完。
+      const onlyAiring = payload.startedCount === 0;
+      const visual: HTMLElement[] = [onlyAiring
         ? heroStat(
-            [{ value: formatInteger(payload.completedCount), unit: "部完食", countTo: payload.completedCount }],
-            `可核對完整集數的 ${formatInteger(payload.sampledCount)} 部作品中`,
+            [{ value: formatInteger(payload.caughtUpCount), unit: "部追到最新", countTo: payload.caughtUpCount }],
+            `還在播的 ${formatInteger(payload.airingCount)} 部作品中`,
             next()
           )
         : heroStat(
-            leader ? percentSegments(leader.ratio) : [{ value: "—" }],
-            leader ? "最接近完食的完成度" : "沒有可核對的作品",
+            [{ value: formatInteger(payload.finishedCount), unit: "部看完", countTo: payload.finishedCount }],
+            `從第 1 集開始看、已完結的 ${formatInteger(payload.startedCount)} 部作品中`,
             next()
           )];
-      visual.push(...rankingList(payload.rows.slice(1).map((row, index) => ({
+      if (!onlyAiring) visual.push(outcomeBreakdown(payload, next()));
+      const [nearest, ...otherNearly] = payload.nearlyRows;
+      visual.push(...rankingList(otherNearly.map((row, index) => ({
         rank: index + 2,
         animeSn: row.animeSn,
         title: row.title,
         coverUrl: row.coverUrl,
-        value: formatPercent(row.ratio),
+        value: `差 ${formatInteger(row.totalEpisode - row.watchedEpisodeCount)} 集`,
         meta: `${formatInteger(row.watchedEpisodeCount)} / ${formatInteger(row.totalEpisode)} 集`,
         level: row.ratio
       })), next));
-      if (payload.tastedCount > 0) {
-        visual.push(note(`另外有 ${formatInteger(payload.tastedCount)} 部只看了一集，就拋之腦後了。`, next()));
+      const tagNote = dropTagSentence(payload);
+      if (tagNote) visual.push(note(tagNote, next()));
+      if (!onlyAiring && payload.caughtUpCount > 0) {
+        visual.push(note(`還在播的作品裡，有 ${formatInteger(payload.caughtUpCount)} 部追到了最新一集。`, next()));
       }
       return {
-        lead: leader
+        lead: nearest
           ? {
-              animeSn: leader.animeSn,
-              title: leader.title,
-              coverUrl: leader.coverUrl,
-              label: payload.completedCount > 0 ? "完食清單第 1" : "最接近完食",
-              value: `${formatInteger(leader.watchedEpisodeCount)} / ${formatInteger(leader.totalEpisode)} 集 · ${formatPercent(leader.ratio)}`,
-              level: leader.ratio
+              animeSn: nearest.animeSn,
+              title: nearest.title,
+              coverUrl: nearest.coverUrl,
+              label: "差一點就看完",
+              value: `${formatInteger(nearest.watchedEpisodeCount)} / ${formatInteger(nearest.totalEpisode)} 集 · 差 ${formatInteger(nearest.totalEpisode - nearest.watchedEpisodeCount)} 集`,
+              level: nearest.ratio
             }
           : null,
+        visual,
+        ...(nearest ? {} : { variant: "wide-visual" as const })
+      };
+    }
+    case "binge": {
+      const payload = chapter.payload;
+      const leader = payload.rows[0];
+      const visual: HTMLElement[] = leader ? [heroStat(
+        [{
+          value: leader.episodesPerDay < 0.1 ? "不到 0.1" : decimal.format(leader.episodesPerDay),
+          unit: "集／日",
+          countTo: leader.episodesPerDay < 0.1 ? undefined : Math.round(leader.episodesPerDay * 10) / 10,
+          countFormat: "decimal"
+        }],
+        "這部平均每天觀看",
+        next()
+      )] : [];
+      visual.push(...rankingList(payload.rows.slice(1).map((row) => ({
+        rank: row.rank,
+        animeSn: row.animeSn,
+        title: row.title,
+        coverUrl: row.coverUrl,
+        value: formatEpisodesPerDay(row.episodesPerDay),
+        level: leader ? row.episodesPerDay / leader.episodesPerDay : undefined
+      })), next));
+      return {
+        lead: leader ? {
+          animeSn: leader.animeSn,
+          title: leader.title,
+          coverUrl: leader.coverUrl,
+          label: "補番速度第 1 名",
+          value: `平均 ${formatEpisodesPerDay(leader.episodesPerDay)}`
+        } : null,
         visual
       };
     }
     case "platform-taste": {
-      const payload = chapter.payload;
-      const gem = payload.hiddenGem;
-      const lead = gem ?? payload.rows[0] ?? null;
-      const visual: HTMLElement[] = [gem
-        ? heroStat(
-            [{ value: formatInteger(gem.gap), unit: "名", countTo: gem.gap }],
-            "你把它排得比平台大眾前面這麼多",
-            next()
-          )
-        : heroStat([{ value: "同步" }], "你最常看的，平台上的大家也在看", next())];
-      // 和別章一樣最多四列。主角是第 1 名時排行從第 2 名接下去；主角是排在後面的私藏時，
-      // 照你的名次列前四名並把它標亮，名次才不會跳號（1、2、4、5），看起來像少了一列。
-      const ranked = lead === payload.rows[0] ? payload.rows.slice(1, 5) : payload.rows.slice(0, 4);
-      visual.push(...rankingList(ranked.map((row) => ({
-        rank: row.personalWatchRank,
-        animeSn: row.animeSn,
-        title: row.title,
-        coverUrl: row.coverUrl,
-        value: `平台 #${formatInteger(row.platformRank)}`,
-        meta: `${formatInteger(row.personalWatchCount)} 次觀看 · 平台人氣 ${formatInteger(row.platformPopular)}`,
-        highlight: row.animeSn === lead?.animeSn
-      })), next));
+      const [gem, second] = chapter.payload.gems;
+      if (!gem) return { lead: null, visual: [] };
+      const visual: HTMLElement[] = [heroStat(
+        [{ value: `第 ${formatInteger(gem.popularityRank)}`, unit: "名" }],
+        `${gem.cohortLabel}開播、你也看過的 ${formatInteger(gem.cohortSize)} 部作品裡，它的人氣名次`,
+        next()
+      )];
+      visual.push(note(`人氣大約只有同季最熱門的《${gem.cohortLeaderTitle}》的 ${formatPercent(gem.popularityRatio)}。`, next()));
+      if (second) {
+        visual.push(...rankingList([{
+          rank: 2,
+          animeSn: second.animeSn,
+          title: second.title,
+          coverUrl: second.coverUrl,
+          value: `${formatInteger(second.popularityRank)} / ${formatInteger(second.cohortSize)}`,
+          meta: `${second.cohortLabel}開播 · 同季人氣名次`
+        }], next));
+      }
       return {
-        lead: lead
-          ? {
-              animeSn: lead.animeSn,
-              title: lead.title,
-              coverUrl: lead.coverUrl,
-              label: gem ? "你的私藏" : "你最常看",
-              value: `你的排行 #${formatInteger(lead.personalWatchRank)} · 平台人氣 #${formatInteger(lead.platformRank)}`
-            }
-          : null,
+        lead: {
+          animeSn: gem.animeSn,
+          title: gem.title,
+          coverUrl: gem.coverUrl,
+          label: "你的私藏",
+          value: `有得選時常先看它 · 同季人氣第 ${formatInteger(gem.popularityRank)} / ${formatInteger(gem.cohortSize)}`
+        },
         visual
       };
     }
@@ -799,37 +840,115 @@ const statCell = (
   return cell;
 };
 
-const factCell = (label: string, segments: readonly QuantitySegment[], detail: string): HTMLElement => {
+const factCell = (label: string, segments: readonly QuantitySegment[], detail?: string): HTMLElement => {
   const cell = element("div", "ani-rc-fact");
-  cell.append(
-    quantity(segments, "ani-rc-fact-value"),
-    textElement("span", "ani-rc-fact-label", label),
-    textElement("span", "ani-rc-fact-detail", detail)
-  );
+  cell.append(quantity(segments, "ani-rc-fact-value"), textElement("span", "ani-rc-fact-label", label));
+  if (detail) cell.append(textElement("span", "ani-rc-fact-detail", detail));
   return cell;
+};
+
+const OUTCOME_LABELS = [
+  ["finished", "看完"],
+  ["nearly", "差一點看完"],
+  ["midway", "半途停下"],
+  ["dropped", "放棄"]
+] as const;
+
+/** 看完、差一點、半途停下、放棄排成一條比例條，下面列出每一類的部數。章節與海報共用。 */
+export const outcomeBreakdown = (payload: CompletionPayload, order: number): HTMLElement => {
+  const block = part("div", "ani-rc-outcomes", "rise", order);
+  const bar = element("div", "ani-rc-outcome-bar");
+  bar.setAttribute("aria-hidden", "true");
+  const legend = element("ul", "ani-rc-outcome-legend");
+  const counts: Record<(typeof OUTCOME_LABELS)[number][0], number> = {
+    finished: payload.finishedCount,
+    nearly: payload.nearlyCount,
+    midway: payload.midwayCount,
+    dropped: payload.droppedCount
+  };
+  for (const [key, label] of OUTCOME_LABELS) {
+    const value = counts[key];
+    if (value > 0) {
+      const segment = element("span", "ani-rc-outcome-segment");
+      segment.dataset.outcome = key;
+      segment.style.flexGrow = String(value);
+      bar.append(segment);
+    }
+    const item = element("li", "ani-rc-outcome");
+    item.dataset.outcome = key;
+    const swatch = element("span", "ani-rc-outcome-swatch");
+    swatch.setAttribute("aria-hidden", "true");
+    item.append(swatch, textElement("span", "ani-rc-outcome-label", label), textElement("strong", "ani-rc-outcome-count", `${formatInteger(value)} 部`));
+    legend.append(item);
+  }
+  block.append(bar, legend);
+  return block;
+};
+
+/** 類型放棄比例的一句話；兩端都不明顯時不說。 */
+export const dropTagSentence = (payload: CompletionPayload): string | null => {
+  const most = payload.mostDroppedTag;
+  const least = payload.leastDroppedTag;
+  const mostText = most
+    ? `最常放棄的是「${most.label}」：${formatInteger(most.startedCount)} 部裡放棄了 ${formatInteger(most.droppedCount)} 部`
+    : null;
+  const leastText = least
+    ? `「${least.label}」${formatInteger(least.startedCount)} 部只放棄 ${formatInteger(least.droppedCount)} 部`
+    : null;
+  if (mostText && leastText) return `${mostText}；${leastText}。`;
+  if (mostText) return `${mostText}。`;
+  return leastText ? `${leastText}，幾乎都會看完。` : null;
+};
+
+/** 年度回顧逐季的最愛：每季一欄，封面加作品名，時刻太少的季照實寫「還看不出來」。 */
+const seasonPicks = (
+  seasons: readonly SeasonFavoritesPayload[],
+  next: () => number
+): HTMLElement => {
+  const grid = element("div", "ani-rc-season-picks");
+  for (const season of seasons) {
+    const column = part("section", "ani-rc-season-pick", "rise", next());
+    column.append(textElement("h4", "ani-rc-season-pick-name", season.label));
+    if (season.rows.length === 0) {
+      column.append(textElement("p", "ani-rc-season-pick-empty", "這季還看不出來"));
+    } else {
+      const list = element("ol", "ani-rc-season-pick-list");
+      for (const row of season.rows) {
+        const item = element("li", "ani-rc-season-pick-item");
+        item.append(
+          recapCover(row.coverUrl, row.title, "ani-rc-season-pick-cover"),
+          phrasedText("span", "ani-rc-season-pick-title", row.title)
+        );
+        list.append(item);
+      }
+      column.append(list);
+    }
+    grid.append(column);
+  }
+  return grid;
 };
 
 const tasteColumn = (
   title: string,
-  rows: readonly { readonly label: string; readonly watchCount: number; readonly animeCount?: number }[],
+  rows: readonly { readonly label: string; readonly animeCount: number }[],
   order: number
 ): HTMLElement => {
   const card = part("section", "ani-recap-taste-column", "rise", order);
   card.append(textElement("h4", "", title));
   const list = element("ol");
   const shown = rows.slice(0, 5);
-  const max = Math.max(1, ...shown.map((row) => row.watchCount));
-  // 每列都只來自一部作品時（常見於導演），等長的 bar 沒有資訊，省下來。
-  const meaningfulBars = shown.some((row) => (row.animeCount ?? 2) > 1);
+  const max = Math.max(1, ...shown.map((row) => row.animeCount));
+  // 每列部數都一樣時（常見於導演），等長的 bar 沒有資訊，省下來。
+  const meaningfulBars = new Set(shown.map((row) => row.animeCount)).size > 1;
   for (const row of shown) {
     const item = element("li");
     const head = element("div", "ani-recap-taste-line");
     head.append(
       textElement("span", "", row.label),
-      textElement("strong", "", `${formatInteger(row.watchCount)} 次`)
+      textElement("strong", "", `${formatInteger(row.animeCount)} 部`)
     );
     item.append(head);
-    if (meaningfulBars) item.append(meterBar(row.watchCount / max, "ani-rc-meter ani-recap-meter"));
+    if (meaningfulBars) item.append(meterBar(row.animeCount / max, "ani-rc-meter ani-recap-meter"));
     list.append(item);
   }
   card.append(list);
@@ -880,7 +999,7 @@ const formatEvidenceValue = (row: RecapEvidenceRow): string => {
 
 const evidenceUnit = (unit: Extract<RecapEvidenceRow, { kind: "count" }>["unit"]): string => {
   switch (unit) {
-    case "watch": return "次觀看";
+    case "watch": return "集";
     case "episode": return "集";
     case "anime": return "部";
     case "day": return "天";

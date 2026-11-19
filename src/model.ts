@@ -53,6 +53,8 @@ export type AnimeMetadata = {
   readonly totalEpisode: number;
   readonly seasonStartDateKey: string | null;
   readonly seasonEndDateKey: string | null;
+  /** Still airing when fetched: the official season end is open-ended (2100/12/31). */
+  readonly isOngoing: boolean;
   readonly coverUrl: string | null;
   readonly tags: readonly string[];
   readonly maker: string | null;

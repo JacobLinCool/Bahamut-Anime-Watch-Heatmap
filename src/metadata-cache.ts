@@ -8,6 +8,7 @@ import type {
 import { cloneMetadataBundle, METADATA_PARSER_VERSION } from "./metadata-schema";
 
 const CACHE_SCHEMA_VERSION = 1;
+const ANIME_CACHE_SCHEMA_VERSION = 2;
 const CACHE_ROOT_PREFIX = "ani-gamer-heatmap:metadata:v1:";
 const EPISODE_CACHE_PREFIX = `${CACHE_ROOT_PREFIX}episode:`;
 const ANIME_CACHE_PREFIX = `${CACHE_ROOT_PREFIX}anime:`;
@@ -31,6 +32,8 @@ export const UNAVAILABLE_CACHE_MAX_TTL_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
 export const UNAVAILABLE_CACHE_JITTER_RATIO = 0.2;
 /** A schema-rejected payload is reused only while the parser version is unchanged. */
 export const INVALID_RESPONSE_CACHE_TTL_MILLISECONDS = 24 * 60 * 60 * 1_000;
+/** The mutable catalog (including current episode count and airing status) is rechecked daily. */
+export const ANIME_METADATA_CACHE_TTL_MILLISECONDS = 24 * 60 * 60 * 1_000;
 
 export type MetadataCacheStorage = {
   readonly get: (keys: string[]) => Promise<Record<string, unknown>>;
@@ -70,13 +73,14 @@ export type StoredAnimePlatformSnapshot = {
 };
 
 export type StoredAnimeMetadata = {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly kind: "anime";
   readonly animeSn: number;
   readonly apiTitle: string;
   readonly totalEpisode: number;
   readonly seasonStartDateKey: string | null;
   readonly seasonEndDateKey: string | null;
+  readonly isOngoing: boolean;
   readonly coverUrl: string | null;
   readonly tags: readonly string[];
   readonly maker: string | null;
@@ -269,6 +273,7 @@ export const parseStoredAnimeMetadata = (
     "director",
     "episodeRefs",
     "fetchedAt",
+    "isOngoing",
     "kind",
     "maker",
     "platformSnapshot",
@@ -279,7 +284,7 @@ export const parseStoredAnimeMetadata = (
     "tags",
     "totalEpisode"
   ], "cached anime metadata");
-  requireCacheHeader(stored, "anime");
+  requireCacheHeader(stored, "anime", ANIME_CACHE_SCHEMA_VERSION);
   const animeSn = requirePositiveSafeInteger(stored.animeSn, "cache.anime.animeSn");
   const expected = requirePositiveSafeInteger(expectedAnimeSn, "expectedAnimeSn");
   if (animeSn !== expected) {
@@ -294,6 +299,7 @@ export const parseStoredAnimeMetadata = (
     totalEpisode: requireNonNegativeSafeInteger(stored.totalEpisode, "cache.anime.totalEpisode"),
     seasonStartDateKey: parseNullableDateKey(stored.seasonStartDateKey, "cache.anime.seasonStartDateKey"),
     seasonEndDateKey: parseNullableDateKey(stored.seasonEndDateKey, "cache.anime.seasonEndDateKey"),
+    isOngoing: requireBoolean(stored.isOngoing, "cache.anime.isOngoing"),
     coverUrl: parseNullableHttpsUrl(stored.coverUrl, "cache.anime.coverUrl"),
     tags,
     maker: parseNullableNonBlankString(stored.maker, "cache.anime.maker"),
@@ -476,7 +482,7 @@ export const readMetadataCache = async (
 
   let corruption: string | undefined;
   if (Object.hasOwn(first, episodeKey)) {
-    const positive = await readPositiveMetadata(storage, first[episodeKey], videoSn);
+    const positive = await readPositiveMetadata(storage, first[episodeKey], videoSn, now);
     if (positive.kind === "hit") return positive;
     if (positive.kind === "invalid") corruption = positive.message;
   }
@@ -514,7 +520,8 @@ export const readMetadataCache = async (
 const readPositiveMetadata = async (
   storage: Pick<MetadataCacheStorage, "get">,
   value: unknown,
-  videoSn: number
+  videoSn: number,
+  now: Date
 ): Promise<
   | { readonly kind: "hit"; readonly bundle: MetadataBundle }
   | { readonly kind: "miss" }
@@ -536,6 +543,8 @@ const readPositiveMetadata = async (
   }
   try {
     const anime = parseStoredAnimeMetadata(second[animeKey], episode.animeSn);
+    const age = now.getTime() - anime.fetchedAt.getTime();
+    if (age < 0 || age >= ANIME_METADATA_CACHE_TTL_MILLISECONDS) return { kind: "miss" };
     if (!anime.episodeRefs.some((reference) =>
       reference.videoSn === episode.videoSn
       && reference.groupKey === episode.groupKey
@@ -576,13 +585,14 @@ export const serializeEpisodeMetadata = (metadata: EpisodeMetadata): StoredEpiso
 });
 
 export const serializeAnimeMetadata = (metadata: AnimeMetadata): StoredAnimeMetadata => ({
-  schemaVersion: CACHE_SCHEMA_VERSION,
+  schemaVersion: ANIME_CACHE_SCHEMA_VERSION,
   kind: "anime",
   animeSn: metadata.animeSn,
   apiTitle: metadata.apiTitle,
   totalEpisode: metadata.totalEpisode,
   seasonStartDateKey: metadata.seasonStartDateKey,
   seasonEndDateKey: metadata.seasonEndDateKey,
+  isOngoing: metadata.isOngoing,
   coverUrl: metadata.coverUrl,
   tags: [...metadata.tags],
   maker: metadata.maker,
@@ -652,8 +662,8 @@ const parseStoredStringArray = (value: unknown, label: string, maximum: number):
   return value.map((item, index) => requireNonBlankString(item, `${label}[${index}]`));
 };
 
-const requireCacheHeader = (stored: JsonRecord, kind: string): void => {
-  if (stored.schemaVersion !== CACHE_SCHEMA_VERSION || stored.kind !== kind) {
+const requireCacheHeader = (stored: JsonRecord, kind: string, version = CACHE_SCHEMA_VERSION): void => {
+  if (stored.schemaVersion !== version || stored.kind !== kind) {
     throw new Error(`cache ${kind} schema header 無效`);
   }
 };
@@ -714,12 +724,17 @@ const parseNullableNonBlankString = (value: unknown, label: string): string | nu
   return value === null ? null : requireNonBlankString(value, label);
 };
 
+const requireBoolean = (value: unknown, label: string): boolean => {
+  if (typeof value !== "boolean") throw new Error(`${label} 必須是 boolean`);
+  return value;
+};
+
 const requireExactRecord = (value: unknown, expectedKeys: readonly string[], label: string): JsonRecord => {
   const record = requireRecord(value, label);
   const actual = Object.keys(record).sort();
   const expected = [...expectedKeys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new Error(`${label} 欄位不符合 schema v1`);
+    throw new Error(`${label} 欄位不符合 schema`);
   }
   return record;
 };

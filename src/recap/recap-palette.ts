@@ -26,6 +26,7 @@ export const RECAP_PALETTES: Readonly<Record<RecapTone, RecapPalette>> = Object.
   runtime: { accent: "#c4b5fd", base: "#120c2a", glow: "#7c3aed" },
   taste: { accent: "#f9a8d4", base: "#1a0b1c", glow: "#db2777" },
   completion: { accent: "#bef264", base: "#0e170a", glow: "#4d7c0f" },
+  binge: { accent: "#fdba74", base: "#21110a", glow: "#ea580c" },
   timeliness: { accent: "#6ee7b7", base: "#061a14", glow: "#059669" },
   "behavior-preference": { accent: "#fcd34d", base: "#1a1408", glow: "#d97706" },
   "platform-taste": { accent: "#f0abfc", base: "#170b1f", glow: "#a21caf" },

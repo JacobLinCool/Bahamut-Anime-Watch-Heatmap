@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { AnalyticsResult } from "../analytics";
+import type { AnalyticsResult, CompletionRow } from "../analytics";
 import { resolvePeriod, type AnalysisScope } from "../period";
 import {
   buildRecapDeck,
@@ -11,8 +11,10 @@ import {
 import { evaluateRecapPersona, RECAP_PERSONA_THRESHOLDS } from "./recap-summary";
 import { initialRecapUiState, reduceRecapUiState, type RecapUiState } from "./recap-state";
 import {
+  bingeResult,
   cover,
   coverage,
+  dailyCountsFrom,
   fullResult,
   instant,
   resolvedPeriod,
@@ -30,6 +32,183 @@ const chapter = <Kind extends RecapPresentationChapter["kind"]>(
 };
 
 describe("recap presentation deck", () => {
+  it("shows a highlight only when it clears its bar, and at most two of them", () => {
+    const base = fullResult();
+    const moment = (animeSn: number, at: string) => ({
+      animeSn,
+      title: `作品 ${animeSn}`,
+      episode: "第 1 集",
+      coverUrl: cover(`moment-${animeSn}`),
+      watchedAt: instant(at)
+    });
+    const oldWorks = (workCount: number, episodeCount: number) => ({
+      workCount,
+      episodeCount,
+      datedEpisodeCount: 100,
+      oldest: { animeSn: 9, title: "老作品", coverUrl: null, premiereYear: 2010 }
+    });
+    const summaryWith = (highlights: AnalyticsResult["highlights"]) => buildRecapDeck({ ...base, highlights }).summary.highlights;
+
+    // 舊作太少、占比也低：不出現。
+    expect(summaryWith({ newYearsEve: null, dawn: null, oldWorks: oldWorks(4, 10) })).toEqual([]);
+    // 部數夠，或占比夠，擇一成立。
+    expect(summaryWith({ newYearsEve: null, dawn: null, oldWorks: oldWorks(5, 10) }).map((item) => item.kind)).toEqual(["old-works"]);
+    expect(summaryWith({ newYearsEve: null, dawn: null, oldWorks: oldWorks(2, 25) })[0]).toMatchObject({ kind: "old-works", episodeShare: 0.25 });
+
+    const all = summaryWith({
+      newYearsEve: { year: 2026, before: moment(1, "2025-12-31T23:50:00+08:00"), after: moment(2, "2026-01-01T00:30:00+08:00") },
+      dawn: {
+        startedAt: instant("2026-07-05T02:30:00+08:00"),
+        endedAt: instant("2026-07-05T06:20:00+08:00"),
+        episodeCount: 6,
+        last: moment(3, "2026-07-05T06:20:00+08:00")
+      },
+      oldWorks: oldWorks(10, 30)
+    });
+    expect(all.map((item) => item.kind)).toEqual(["new-year", "dawn"]);
+    expect(all[0]).toMatchObject({ before: { time: "23:50", dateLabel: "12/31" }, after: { time: "00:30", dateLabel: "1/1" } });
+    expect(all[1]).toMatchObject({ startTime: "02:30", episodeCount: 6, last: { time: "06:20", dateLabel: "7/5" } });
+  });
+
+  it("lists each season's favorites and names a hidden gem only when one qualifies", () => {
+    const base = fullResult();
+    const pick = base.preference.rows[0]!;
+    const seasons = (["winter", "spring", "summer"] as const).map((season, index) => ({
+      year: 2026,
+      season,
+      choiceEventCount: 12,
+      rows: index === 1 ? [] : [pick]
+    }));
+    const gem = {
+      animeSn: pick.animeSn,
+      title: pick.title,
+      coverUrl: pick.coverUrl,
+      cohortYear: 2026,
+      cohortSeason: "summer" as const,
+      cohortSize: 20,
+      popularityRank: 15,
+      cohortLeaderTitle: "大作",
+      popularityRatio: 0.17
+    };
+    const deck = buildRecapDeck({ ...base, favorites: { seasons, hiddenGems: [gem] } });
+    const preference = chapter(deck, "behavior-preference");
+    expect(preference.title).toBe("每一季，你最先點開的作品");
+    expect(preference.payload.seasons.map((season) => [season.label, season.rows.length])).toEqual([
+      ["冬季", 1],
+      ["春季", 0],
+      ["夏季", 1]
+    ]);
+    const hidden = chapter(deck, "platform-taste");
+    expect(hidden.title).toBe("《作品 A》是你的私藏");
+    expect(hidden.narrative).toBe("有得選時你常常先點開它；但 2026 夏季開播、你也看過的 20 部作品裡，它的人氣只排第 15。");
+    expect(hidden.payload.gems[0]?.cohortLabel).toBe("2026 夏季");
+
+    // 沒有私藏：整章不出現，也不拿「你最常看」充數。
+    const plain = buildRecapDeck({ ...base, favorites: { seasons: [], hiddenGems: [] } });
+    expect(plain.chapters.some((item) => item.kind === "platform-taste")).toBe(false);
+    expect(plain.omissions.find((item) => item.chapter === "platform-taste")?.reason).toBe("no-hidden-gem");
+    expect(chapter(plain, "behavior-preference").title).toBe("有得選時，你最常先看《作品 A》");
+  });
+
+  it("sorts started works into finished, nearly, midway and dropped, and keeps airing ones apart", () => {
+    const base = fullResult();
+    const row = (animeSn: number, watched: number, total: number, outcome: CompletionRow["outcome"], isOngoing = false): CompletionRow => ({
+      animeSn,
+      title: `作品 ${animeSn}`,
+      coverUrl: cover(`work-${animeSn}`),
+      watchedEpisodeCount: watched,
+      totalEpisode: total,
+      ratio: watched / total,
+      isOngoing,
+      outcome
+    });
+    const tag = (label: string, startedCount: number, droppedCount: number) =>
+      ({ label, startedCount, droppedCount, dropRate: droppedCount / startedCount });
+    const rows = [
+      row(1, 12, 12, "finished"), row(2, 12, 12, "finished"), row(3, 24, 24, "finished"),
+      row(4, 10, 12, "nearly"), row(5, 12, 13, "nearly"),
+      row(6, 7, 12, "midway"),
+      row(7, 1, 12, "dropped"), row(8, 3, 12, "dropped"),
+      row(9, 5, 24, "unknown-start"),
+      row(10, 7, 7, "caught-up", true), row(11, 3, 7, "behind", true)
+    ];
+    const deck = buildRecapDeck({
+      ...base,
+      completion: {
+        available: true,
+        rows,
+        // 整體放棄 2/8＝25%：校園 50% 夠高、動作 0% 夠低，戀愛 25% 跟整體一樣不提。
+        dropTags: [tag("校園", 8, 4), tag("戀愛", 8, 2), tag("動作", 8, 0)]
+      }
+    });
+    const completion = chapter(deck, "completion");
+    expect(completion.payload).toMatchObject({
+      startedCount: 8,
+      finishedCount: 3,
+      nearlyCount: 2,
+      midwayCount: 1,
+      droppedCount: 2,
+      tastedCount: 1,
+      airingCount: 2,
+      caughtUpCount: 1,
+      mostDroppedTag: { label: "校園", droppedCount: 4 },
+      leastDroppedTag: { label: "動作", droppedCount: 0 }
+    });
+    // 差得最少的在前：只差 1 集的排在差 2 集的前面。
+    expect(completion.payload.nearlyRows.map((item) => item.animeSn)).toEqual([5, 4]);
+    expect(completion.title).toBe("你把 3 部作品從頭看到尾");
+    expect(completion.narrative).toBe("從第 1 集開始看、已完結的 8 部作品裡，有 38% 一集不漏。");
+
+    // 類型之間差不多時，不硬挑一個說。
+    const flat = buildRecapDeck({ ...base, completion: { available: true, rows, dropTags: [tag("校園", 8, 2), tag("動作", 8, 2)] } });
+    expect(chapter(flat, "completion").payload).toMatchObject({ mostDroppedTag: null, leastDroppedTag: null });
+
+    // 只有還在播的作品：改說追到最新。
+    const airingOnly = buildRecapDeck({ ...base, completion: { available: true, rows: rows.slice(-2), dropTags: [] } });
+    expect(chapter(airingOnly, "completion").payload).toMatchObject({ startedCount: 0, caughtUpCount: 1 });
+    expect(chapter(airingOnly, "completion").title).toContain("追到最新");
+  });
+
+  it("features the highest daily episode rate rather than the shortest season duration", () => {
+    const source = bingeResult();
+    const deck = buildRecapDeck(source);
+    const insight = chapter(deck, "binge");
+    const kinds = deck.chapters.map((item) => item.kind);
+    expect(kinds.indexOf("binge")).toBe(kinds.indexOf("completion") + 1);
+    expect(insight.payload.completedCount).toBe(2);
+    expect(insight.payload.rows[0]).toEqual({
+      rank: 1,
+      animeSn: 40,
+      title: "補番作品 B",
+      coverUrl: cover("binge-b"),
+      episodesPerDay: 3
+    });
+    expect(insight.title).toContain("補番作品 B");
+    expect(insight.narrative).toContain("補完了 2 部");
+    expect(insight.narrative).not.toMatch(/耗時|最快的一部|12 集|24 集/);
+    expect(deck.summary.covers.map((row) => row.animeSn)).toContain(30);
+    const fingerprint = deck.fingerprint;
+    const changed = {
+      ...source,
+      binge: { ...source.binge, rows: source.binge.rows.map((row, index) => index === 0 ? { ...row, episodesPerDay: 4 } : row) }
+    };
+    expect(insight.payload.rows[0]!.episodesPerDay).toBe(3);
+    expect(buildRecapDeck(changed).fingerprint).not.toBe(fingerprint);
+  });
+
+  it("omits the binge chapter and its covers when no season qualifies", () => {
+    const result = bingeResult();
+    for (const available of [false, true]) {
+      const deck = buildRecapDeck({ ...result, binge: { available, rows: [] } });
+      expect(deck.chapters.some((item) => item.kind === "binge")).toBe(false);
+      expect(deck.omissions).toContainEqual(expect.objectContaining({
+        chapter: "binge",
+        reason: "no-binge-completions"
+      }));
+      expect(deck.summary.covers.some((row) => row.animeSn === 30)).toBe(false);
+    }
+  });
+
   it("builds release-calendar-year chapters in presentation order", () => {
     const deck = buildRecapDeck(fullResult());
     expect(deck.chapters.map((item) => item.kind)).toEqual([
@@ -128,7 +307,7 @@ describe("recap presentation deck", () => {
     const seasons = chapter(buildRecapDeck(tied), "season-breakdown");
 
     expect(seasons.payload.leadingSeasons).toEqual(["winter", "summer"]);
-    expect(seasons.narrative).toBe("各有 4 次觀看。");
+    expect(seasons.narrative).toBe("各看了 4 集。");
   });
 
   it("deep-freezes the complete presentation graph and detaches it from source rows", () => {
@@ -144,7 +323,7 @@ describe("recap presentation deck", () => {
     expect(Object.isFrozen(deck.summary)).toBe(true);
     expect(Object.isFrozen(deck.summary.covers)).toBe(true);
     expect(Object.isFrozen(deck.summary.persona)).toBe(true);
-    expect(Object.isFrozen(deck.summary.rhythm?.points)).toBe(true);
+    expect(Object.isFrozen(deck.summary.calendar?.days)).toBe(true);
 
     const mutableRows = source.runtime.rows as Array<AnalyticsResult["runtime"]["rows"][number]>;
     mutableRows[0] = { ...mutableRows[0]!, title: "被外部改寫" };
@@ -253,7 +432,7 @@ describe("evidence gates", () => {
         directors: [],
         publishers: []
       },
-      completion: { available: false, rows: [] },
+      completion: { available: false, rows: [], dropTags: [] },
       habitClock: {
         available: false,
         hourCounts: Array.from({ length: 24 }, () => 0),
@@ -321,7 +500,7 @@ describe("fingerprint", () => {
     const first = buildRecapDeck(fullResult());
     const second = buildRecapDeck(fullResult());
     expect(first.fingerprint).toBe(second.fingerprint);
-    expect(first.fingerprint).toMatch(/^recap-v6:[a-f0-9]{64}$/);
+    expect(first.fingerprint).toMatch(/^recap-v9:[a-f0-9]{64}$/);
   });
 
   it("changes for substantive analytic and metadata-derived presentation changes", () => {
@@ -358,22 +537,20 @@ describe("fingerprint", () => {
     };
     expect(buildRecapDeck(tagChanged).fingerprint).not.toBe(baselineFingerprint);
 
-    // 結尾海報的節奏條把 rhythm 凍進 deck：節奏改變就是另一份回顧（schema v5 起的刻意變更）。
-    const rhythmResult = fullResult();
-    const rhythmChanged: AnalyticsResult = {
-      ...rhythmResult,
-      rhythm: rhythmResult.rhythm.map((point, index) => index === 0
-        ? { ...point, count: point.count + 1 }
-        : point)
+    // 結尾海報的熱度圖把每天的集數凍進 deck：哪一天多看一集就是另一份回顧。
+    const calendarResult = fullResult();
+    const calendarChanged: AnalyticsResult = {
+      ...calendarResult,
+      dailyCounts: calendarResult.dailyCounts.map((day) => day.dateKey === "2026-03-01" ? { ...day, count: 1 } : day)
     };
-    expect(buildRecapDeck(rhythmChanged).fingerprint).not.toBe(baselineFingerprint);
+    expect(buildRecapDeck(calendarChanged).fingerprint).not.toBe(baselineFingerprint);
 
-    // 只影響分鐘數、不在海報與章節上的欄位，仍不改變 fingerprint。
-    const minutesOnly: AnalyticsResult = {
+    // 儀表板的月節奏不在海報與章節上：只改它不改變 fingerprint。
+    const rhythmOnly: AnalyticsResult = {
       ...fullResult(),
-      rhythm: fullResult().rhythm.map((point) => ({ ...point, contentMinutes: (point.contentMinutes ?? 0) + 5 }))
+      rhythm: fullResult().rhythm.map((point) => ({ ...point, count: point.count + 1, contentMinutes: (point.contentMinutes ?? 0) + 5 }))
     };
-    expect(buildRecapDeck(minutesOnly).fingerprint).toBe(baselineFingerprint);
+    expect(buildRecapDeck(rhythmOnly).fingerprint).toBe(baselineFingerprint);
   });
 
   it("ignores the as-of minute of a to-date range but not a change of shown dates", () => {
@@ -405,7 +582,7 @@ const withoutMetadata = (result: AnalyticsResult): AnalyticsResult => ({
   summary: { ...result.summary, animeCount: 0, knownContentMinutes: 0, contentMinutes: null, medianLagMinutes: null, within24HoursCount: null, within24HoursRate: null },
   runtime: { available: false, coverage: coverage(0, 12, false), rows: [], longestEpisode: null },
   catalog: { animeCoverage: coverage(0, 3, false), tags: [], makers: [], directors: [], publishers: [] },
-  completion: { available: false, rows: [] },
+  completion: { available: false, rows: [], dropTags: [] },
   timeliness: { available: false, coverage: coverage(0, 12, false), rows: [] },
   preference: { available: false, coverage: coverage(0, 12, false), choiceEventCount: 0, rows: [] },
   marathon: { ...result.marathon, topSingleDayRun: null }
@@ -420,15 +597,12 @@ describe("summary poster payload", () => {
     expect(summary.hero).toEqual({ kind: "known-runtime", minutes: 366 });
     // 拼貼以作品去重：同一部作品出現在多章也只放一張。
     expect(summary.covers.map((item) => item.animeSn)).toEqual([10, 20]);
-    expect(summary.ledger).toMatchObject({ chapterId: "runtime", metric: "known-minutes", label: "片長排行" });
-    expect(summary.ledger?.rows.map((row) => [row.title, row.value, row.watchCount])).toEqual([
-      ["作品 A", 210, 6],
-      ["作品 B", 100, 4]
-    ]);
-    expect(summary.rhythm).toEqual({
-      granularity: "month",
-      points: [{ key: "2026-01", count: 2 }, { key: "2026-07", count: 5 }],
-      peak: { key: "2026-07", count: 5 }
+    expect(summary.calendar?.days).toHaveLength(365);
+    expect(summary.calendar).toMatchObject({
+      activeDayCount: 9,
+      peak: { dateKey: "2026-07-04", count: 4 },
+      // 依上架時間時，連續幾天有上架不是觀看習慣：不畫最長連續。
+      longestStreak: null
     });
     expect(summary.weekdayCounts).toEqual([0, 0, 0, 0, 0, 7, 5]);
     // 期間本身（含頭含尾）：觀看日占比與馬拉松時間軸的分母。
@@ -448,9 +622,8 @@ describe("summary poster payload", () => {
     const summary = deck.summary;
     expect(summary.hero).toEqual({ kind: "watch-count", count: 12 });
     expect(summary.covers).toEqual([]);
-    expect(summary.ledger).toBeNull();
     expect(summary.persona?.primary.key).toBe("night-owl");
-    expect(summary.rhythm?.points.length).toBe(2);
+    expect(summary.calendar?.activeDayCount).toBe(9);
     // 辨識不出作品時，總覽不說「來自 0 部作品」。
     expect(chapter(deck, "overview").narrative).toBe("你看了 12 個不同單集。");
   });
@@ -485,7 +658,7 @@ describe("summary poster payload", () => {
     expect(rollingDeck.summary.period.dayCount).toBe(365);
   });
 
-  it("labels a fallback ledger truthfully when runtime is unavailable", () => {
+  it("falls back to the episode count when runtime is unavailable", () => {
     const result = fullResult();
     const deck = buildRecapDeck({
       ...result,
@@ -493,42 +666,37 @@ describe("summary poster payload", () => {
       runtime: { available: false, coverage: coverage(0, 12, false), rows: [], longestEpisode: null }
     });
     expect(deck.summary.hero).toEqual({ kind: "watch-count", count: 12 });
-    expect(deck.summary.ledger).toMatchObject({
-      chapterId: "behavior-preference",
-      metric: "win-rate",
-      label: "有得選時最先看"
-    });
-    expect(deck.summary.ledger?.rows.map((row) => row.value)).toEqual([0.9, 0.5]);
   });
 
-  it("omits the rhythm strip when the period has no plays to draw", () => {
+  it("omits the calendar when the period has no plays to draw", () => {
     const deck = buildRecapDeck({
       ...fullResult(),
-      rhythm: [{ label: "2026-01", count: 0, contentMinutes: 0 }]
+      dailyCounts: dailyCountsFrom("2026-01-01", 31, {})
     });
-    expect(deck.summary.rhythm).toBeNull();
-    const daily = buildRecapDeck({
-      ...fullResult(),
-      rhythm: [{ label: "2026-06-01", count: 1, contentMinutes: 23 }, { label: "2026-06-02", count: 3, contentMinutes: 69 }]
-    });
-    expect(daily.summary.rhythm).toMatchObject({ granularity: "day", peak: { key: "2026-06-02", count: 3 } });
+    expect(deck.summary.calendar).toBeNull();
   });
 
-  it("draws a season's rhythm week by week and freezes it into the fingerprint", () => {
-    const base = fullResult();
-    const weekly = buildRecapDeck({
-      ...base,
-      weeklyRhythm: [
-        { label: "2026-07-01", count: 2, contentMinutes: 48 },
-        { label: "2026-07-08", count: 5, contentMinutes: 120 },
-        { label: "2026-07-15", count: 0, contentMinutes: 0 }
-      ]
+  it("marks the longest watching streak by watch date, keeping the earliest of equal runs and peaks", () => {
+    const watched: AnalysisScope = {
+      axis: "watched-at",
+      dayBoundaryMode: "thirty-hour",
+      period: { kind: "calendar-month", year: 2026, month: 6 }
+    };
+    const deck = buildRecapDeck({
+      ...fullResult(),
+      scope: watched,
+      period: resolvePeriod(watched, instant("2026-08-01T12:00:00+08:00")),
+      dailyCounts: dailyCountsFrom("2026-06-01", 30, {
+        "2026-06-02": 3, "2026-06-03": 1, "2026-06-04": 2,
+        "2026-06-10": 3,
+        "2026-06-20": 1, "2026-06-21": 1, "2026-06-22": 1
+      })
     });
-    expect(weekly.summary.rhythm).toMatchObject({ granularity: "week", peak: { key: "2026-07-08", count: 5 } });
-    expect(weekly.summary.rhythm?.points).toHaveLength(3);
-    expect(Object.isFrozen(weekly.summary.rhythm?.points)).toBe(true);
-    // 換成週節奏就是不同的結尾內容：fingerprint 跟著變。
-    expect(weekly.fingerprint).not.toBe(buildRecapDeck(base).fingerprint);
+    expect(deck.summary.calendar).toMatchObject({
+      activeDayCount: 7,
+      peak: { dateKey: "2026-06-02", count: 3 },
+      longestStreak: { fromDateKey: "2026-06-02", toDateKey: "2026-06-04", days: 3 }
+    });
   });
 });
 
@@ -551,21 +719,34 @@ describe("viewing persona rules", () => {
     longestStreak: null,
     topSingleDayRun: { animeSn: 1, title: "作品", coverUrl: null, dateKey: "2026-07-04", watchCount: episodes }
   });
-  const completion = (sampled: number, completed: number, tasted: number): RecapPresentationChapter =>
-    stub("completion", { sampledCount: sampled, completedCount: completed, tastedCount: tasted, rows: [] });
-  const platform = (personalWatchRank: number, gap: number): RecapPresentationChapter => {
-    const row = {
+  const completion = (started: number, finished: number, tasted: number): RecapPresentationChapter => stub("completion", {
+    startedCount: started,
+    finishedCount: finished,
+    nearlyCount: 0,
+    midwayCount: 0,
+    droppedCount: started - finished,
+    tastedCount: tasted,
+    airingCount: 0,
+    caughtUpCount: 0,
+    nearlyRows: [],
+    mostDroppedTag: null,
+    leastDroppedTag: null,
+    tagDrops: []
+  });
+  const platform = (popularityRank: number, popularityRatio: number): RecapPresentationChapter => stub("platform-taste", {
+    gems: [{
       animeSn: 7,
       title: "私藏",
       coverUrl: null,
-      personalWatchRank,
-      personalWatchCount: 9,
-      platformRank: personalWatchRank + gap,
-      platformPopular: 100,
-      gap
-    };
-    return stub("platform-taste", { rows: [row], hiddenGem: row, averageGap: gap });
-  };
+      cohortYear: 2026,
+      cohortSeason: "summer",
+      cohortSize: 20,
+      popularityRank,
+      cohortLeaderTitle: "大作",
+      popularityRatio,
+      cohortLabel: "2026 夏季"
+    }]
+  });
 
   const timeliness = (within24Hours: number, samples: number): RecapPresentationChapter => stub("timeliness", {
     overallMedianLagMinutes: 90,
@@ -608,9 +789,8 @@ describe("viewing persona rules", () => {
       nightOwlShare: 0.4,
       nightOwlStrongShare: 0.85,
       nightOwlMinWatches: 10,
-      curatorMaxPersonalRank: 3,
-      curatorMinGap: 20,
-      curatorStrongGap: 100
+      curatorShortfall: 0.5,
+      curatorStrongShortfall: 0.9
     });
   });
 
@@ -625,12 +805,13 @@ describe("viewing persona rules", () => {
     expect(evaluateRecapPersona([timeliness(4, 10)])).toBeNull();
     expect(evaluateRecapPersona([clock(4, 10)])?.primary).toMatchObject({ key: "night-owl", strength: 0 });
     expect(evaluateRecapPersona([clock(3, 10)])).toBeNull();
-    expect(evaluateRecapPersona([platform(4, 80)])).toBeNull();
-    expect(evaluateRecapPersona([platform(3, 19)])).toBeNull();
-    expect(evaluateRecapPersona([platform(3, 20)])?.primary).toMatchObject({
+    // 私藏本身已經要求偏心又冷門：有私藏就成立，強度看它比同季最熱門的少多少。
+    expect(evaluateRecapPersona([platform(15, 0.5)])?.primary).toMatchObject({
       key: "curator",
-      reason: "你排第 3 的《私藏》，平台人氣只排第 23"
+      strength: 0,
+      reason: "你最先點開的《私藏》，同季你看的 20 部裡人氣只排第 15"
     });
+    expect(evaluateRecapPersona([platform(19, 0.1)])?.primary.strength).toBe(1);
   });
 
   it("needs a minimum sample before naming a share-based trait", () => {
@@ -649,7 +830,7 @@ describe("viewing persona rules", () => {
   });
 
   it("picks the strongest trait and keeps up to two more", () => {
-    const persona = evaluateRecapPersona([marathon(15), completion(10, 5, 4), platform(1, 60)]);
+    const persona = evaluateRecapPersona([marathon(15), completion(10, 5, 4), platform(15, 0.3)]);
     expect(persona?.primary).toMatchObject({ key: "binge", strength: 1 });
     expect(persona?.others.map((trait) => trait.key)).toEqual(["curator", "completist"]);
   });

@@ -1,4 +1,4 @@
-import type { AnalyticsResult } from "../analytics";
+import type { AnalyticsResult, WatchMoment } from "../analytics";
 import { formatHourRange, formatInteger, formatPercent, truncateText } from "../analysis-format";
 import type { CalendarSeason, PeriodDefinition } from "../period";
 import { addTaipeiCalendarDays, toTaipeiDateKey } from "../time";
@@ -6,7 +6,6 @@ import type { RecapChapterKind, RecapPresentationChapter, TimelinessPayload } fr
 
 /** 拼貼最多放幾張封面：夠形成一疊，又不會把英雄數字擠走。 */
 export const RECAP_SUMMARY_COVER_LIMIT = 7;
-export const RECAP_SUMMARY_LEDGER_LIMIT = 5;
 
 /**
  * 「你的觀看型態」規則門檻。每條規則都只讀章節 payload，沒觸發就不出現；
@@ -20,7 +19,7 @@ export const RECAP_PERSONA_THRESHOLDS = Object.freeze({
   /** 一口氣派：同一天同一部作品連看的集數。 */
   bingeSingleDayEpisodes: 6,
   bingeStrongEpisodes: 15,
-  /** 完食派：可核對作品中完整看完的比例與最低部數。 */
+  /** 完食派：從頭開始看、已完結的作品中完整看完的比例與最低部數。 */
   completistShare: 0.4,
   completistStrongShare: 0.8,
   completistMinCount: 3,
@@ -32,11 +31,57 @@ export const RECAP_PERSONA_THRESHOLDS = Object.freeze({
   nightOwlShare: 0.4,
   nightOwlStrongShare: 0.85,
   nightOwlMinWatches: 10,
-  /** 獨到眼光：自己前幾名的作品，平台人氣排名落後多少名。 */
-  curatorMaxPersonalRank: 3,
-  curatorMinGap: 20,
-  curatorStrongGap: 100
+  /**
+   * 獨到眼光：有私藏就成立（私藏本身已經要求偏心、又在同季人氣後段）。
+   * 強度看它的人氣比同季最熱門的作品少多少：少一半起算，只剩一成算最鮮明。
+   */
+  curatorShortfall: 0.5,
+  curatorStrongShortfall: 0.9
 });
+
+/** 亮點的門檻：沒過就不出現，海報上最多放幾則。 */
+export const RECAP_HIGHLIGHT_THRESHOLDS = Object.freeze({
+  /** 補舊作：舊作至少這麼多部，或舊作集數至少占這個比例，擇一成立。 */
+  oldWorkMinCount: 5,
+  oldWorkMinShare: 0.25,
+  maxCount: 2
+});
+
+export type RecapHighlightMoment = {
+  readonly animeSn: number | null;
+  readonly title: string;
+  readonly episode: string;
+  readonly coverUrl: string | null;
+  /** 台北時間 M/D。 */
+  readonly dateLabel: string;
+  /** 台北時間 HH:MM。 */
+  readonly time: string;
+};
+
+export type RecapHighlight =
+  | {
+      readonly kind: "new-year";
+      readonly year: number;
+      readonly before: RecapHighlightMoment | null;
+      readonly after: RecapHighlightMoment | null;
+    }
+  | {
+      readonly kind: "dawn";
+      readonly startTime: string;
+      readonly episodeCount: number;
+      readonly last: RecapHighlightMoment;
+    }
+  | {
+      readonly kind: "old-works";
+      readonly workCount: number;
+      readonly episodeShare: number;
+      readonly oldest: {
+        readonly animeSn: number;
+        readonly title: string;
+        readonly coverUrl: string | null;
+        readonly premiereYear: number;
+      };
+    };
 
 export type RecapPersonaKey = "fresh" | "binge" | "completist" | "sampler" | "night-owl" | "curator";
 
@@ -64,40 +109,24 @@ export type RecapSummaryCover = {
   readonly coverUrl: string;
 };
 
-export type RecapSummaryLedgerMetric =
-  | "known-minutes"
-  | "watch-count"
-  | "win-rate"
-  | "completion"
-  | "median-lag";
-
-export type RecapSummaryLedgerRow = {
-  readonly rank: number;
-  readonly animeSn: number;
-  readonly title: string;
-  readonly coverUrl: string | null;
-  readonly value: number;
-  readonly watchCount: number | null;
-};
-
-export type RecapSummaryLedger = {
-  readonly chapterId: RecapChapterKind;
-  readonly metric: RecapSummaryLedgerMetric;
-  readonly label: string;
-  readonly rows: readonly RecapSummaryLedgerRow[];
-};
-
-export type RecapSummaryRhythmPoint = {
-  /** YYYY-MM（月）或 YYYY-MM-DD（日）。 */
-  readonly key: string;
+export type RecapSummaryCalendarDay = {
+  readonly dateKey: string;
   readonly count: number;
 };
 
-export type RecapSummaryRhythm = {
-  /** week：季度這類一到四個月的期間，月份太少、日又太多，改用七天一格。 */
-  readonly granularity: "month" | "week" | "day";
-  readonly points: readonly RecapSummaryRhythmPoint[];
-  readonly peak: RecapSummaryRhythmPoint;
+/** 結尾海報的熱度圖：整段期間一天一格，連同有看的天數、最多的一天與最長連續。 */
+export type RecapSummaryCalendar = {
+  /** 期間內每一天（含沒看的日子），依日期排序。 */
+  readonly days: readonly RecapSummaryCalendarDay[];
+  readonly activeDayCount: number;
+  /** 最多的一天；同數時取較早的日期，和馬拉松章的規則一致。 */
+  readonly peak: RecapSummaryCalendarDay;
+  /** 最長的連續有看天數；只有依觀看時間才有意義，上架軸或不到兩天時為 null。 */
+  readonly longestStreak: {
+    readonly fromDateKey: string;
+    readonly toDateKey: string;
+    readonly days: number;
+  } | null;
 };
 
 /** 期間本身（含頭含尾的日期與天數）：觀看日占比與馬拉松的時間軸都以它為分母。 */
@@ -113,9 +142,10 @@ export type RecapSummaryPayload = {
   readonly period: RecapSummaryPeriod;
   readonly hero: RecapSummaryHero;
   readonly covers: readonly RecapSummaryCover[];
-  readonly ledger: RecapSummaryLedger | null;
   readonly persona: RecapPersona | null;
-  readonly rhythm: RecapSummaryRhythm | null;
+  readonly calendar: RecapSummaryCalendar | null;
+  /** 只對這個人成立的亮點（跨年夜、天亮了還在看、補舊作），依序最多兩則。 */
+  readonly highlights: readonly RecapHighlight[];
   /** 週日到週六的播放次數；只有觀看時鐘成立時才有。 */
   readonly weekdayCounts: readonly number[] | null;
 };
@@ -137,9 +167,9 @@ export const buildRecapSummary = (
     period,
     hero: summaryHero(result, chapters),
     covers: collectSummaryCovers(chapters),
-    ledger: summaryLedger(chapters),
     persona: evaluateRecapPersona(chapters),
-    rhythm: summaryRhythm(result.weeklyRhythm ?? result.rhythm, result.weeklyRhythm !== undefined),
+    calendar: summaryCalendar(result),
+    highlights: summaryHighlights(result),
     weekdayCounts: result.habitClock.available && result.habitClock.weekdayCounts.length === 7
       ? [...result.habitClock.weekdayCounts]
       : null
@@ -212,17 +242,19 @@ export const collectSummaryCovers = (
           (index === 0 ? leads : fillers).push(cover(row.animeSn, row.title, row.coverUrl)));
         break;
       case "completion":
+        chapter.payload.nearlyRows.forEach((row, index) =>
+          (index === 0 ? leads : fillers).push(cover(row.animeSn, row.title, row.coverUrl)));
+        break;
+      case "binge":
       case "timeliness":
       case "behavior-preference":
         chapter.payload.rows.forEach((row, index) =>
           (index === 0 ? leads : fillers).push(cover(row.animeSn, row.title, row.coverUrl)));
         break;
-      case "platform-taste": {
-        const lead = chapter.payload.hiddenGem ?? chapter.payload.rows[0] ?? null;
-        if (lead) leads.push(cover(lead.animeSn, lead.title, lead.coverUrl));
-        for (const row of chapter.payload.rows) fillers.push(cover(row.animeSn, row.title, row.coverUrl));
+      case "platform-taste":
+        chapter.payload.gems.forEach((gem, index) =>
+          (index === 0 ? leads : fillers).push(cover(gem.animeSn, gem.title, gem.coverUrl)));
         break;
-      }
       default:
         break;
     }
@@ -238,104 +270,78 @@ export const collectSummaryCovers = (
   return covers;
 };
 
-/** 片長排行優先；沒有片長時改用其他「依作品排名」的清單，並如實標示排名依據。 */
-const summaryLedger = (chapters: readonly RecapPresentationChapter[]): RecapSummaryLedger | null => {
-  const runtime = findChapter(chapters, "runtime");
-  if (runtime && runtime.payload.rows.length > 0) {
-    return {
-      chapterId: "runtime",
-      metric: "known-minutes",
-      label: "片長排行",
-      rows: runtime.payload.rows.slice(0, RECAP_SUMMARY_LEDGER_LIMIT).map((row) => ({
-        rank: row.rank,
-        animeSn: row.animeSn,
-        title: row.title,
-        coverUrl: row.coverUrl,
-        value: row.contentMinutes,
-        watchCount: row.watchCount
-      }))
-    };
+const summaryHighlights = (result: AnalyticsResult): readonly RecapHighlight[] => {
+  const t = RECAP_HIGHLIGHT_THRESHOLDS;
+  const { newYearsEve, dawn, oldWorks } = result.highlights;
+  const highlights: RecapHighlight[] = [];
+  if (newYearsEve) {
+    highlights.push({
+      kind: "new-year",
+      year: newYearsEve.year,
+      before: newYearsEve.before ? highlightMoment(newYearsEve.before) : null,
+      after: newYearsEve.after ? highlightMoment(newYearsEve.after) : null
+    });
   }
-  const platform = findChapter(chapters, "platform-taste");
-  if (platform && platform.payload.rows.length > 0) {
-    return {
-      chapterId: "platform-taste",
-      metric: "watch-count",
-      label: "最常看的作品",
-      rows: platform.payload.rows
-        .slice()
-        .sort((left, right) => left.personalWatchRank - right.personalWatchRank)
-        .slice(0, RECAP_SUMMARY_LEDGER_LIMIT)
-        .map((row) => ({
-          rank: row.personalWatchRank,
-          animeSn: row.animeSn,
-          title: row.title,
-          coverUrl: row.coverUrl,
-          value: row.personalWatchCount,
-          watchCount: row.personalWatchCount
-        }))
-    };
+  if (dawn) {
+    highlights.push({
+      kind: "dawn",
+      startTime: taipeiTime(dawn.startedAt),
+      episodeCount: dawn.episodeCount,
+      last: highlightMoment(dawn.last)
+    });
   }
-  const preference = findChapter(chapters, "behavior-preference");
-  if (preference && preference.payload.rows.length > 0) {
-    return {
-      chapterId: "behavior-preference",
-      metric: "win-rate",
-      label: "有得選時最先看",
-      rows: preference.payload.rows.slice(0, RECAP_SUMMARY_LEDGER_LIMIT).map((row) => ({
-        rank: row.rank,
-        animeSn: row.animeSn,
-        title: row.title,
-        coverUrl: row.coverUrl,
-        value: row.rawWinRate,
-        watchCount: null
-      }))
-    };
+  if (oldWorks) {
+    const episodeShare = oldWorks.datedEpisodeCount > 0 ? oldWorks.episodeCount / oldWorks.datedEpisodeCount : 0;
+    if (oldWorks.workCount >= t.oldWorkMinCount || episodeShare >= t.oldWorkMinShare) {
+      highlights.push({ kind: "old-works", workCount: oldWorks.workCount, episodeShare, oldest: { ...oldWorks.oldest } });
+    }
   }
-  const completion = findChapter(chapters, "completion");
-  if (completion && completion.payload.rows.length > 0) {
-    return {
-      chapterId: "completion",
-      metric: "completion",
-      label: "追得最完整",
-      rows: completion.payload.rows.slice(0, RECAP_SUMMARY_LEDGER_LIMIT).map((row, index) => ({
-        rank: index + 1,
-        animeSn: row.animeSn,
-        title: row.title,
-        coverUrl: row.coverUrl,
-        value: row.ratio,
-        watchCount: null
-      }))
-    };
-  }
-  const timeliness = findChapter(chapters, "timeliness");
-  if (timeliness && timeliness.payload.rows.length > 0) {
-    return {
-      chapterId: "timeliness",
-      metric: "median-lag",
-      label: "追得最快",
-      rows: timeliness.payload.rows.slice(0, RECAP_SUMMARY_LEDGER_LIMIT).map((row) => ({
-        rank: row.rank,
-        animeSn: row.animeSn,
-        title: row.title,
-        coverUrl: row.coverUrl,
-        value: row.medianLagMinutes,
-        watchCount: null
-      }))
-    };
-  }
-  return null;
+  return highlights.slice(0, t.maxCount);
 };
 
-const summaryRhythm = (rhythm: AnalyticsResult["rhythm"], weekly: boolean): RecapSummaryRhythm | null => {
-  if (rhythm.length === 0) return null;
-  const points = rhythm.map((point) => ({ key: point.label, count: point.count }));
-  const peak = points.reduce((best, point) => point.count > best.count ? point : best, points[0]!);
-  if (peak.count <= 0) return null;
+const highlightMoment = (moment: WatchMoment): RecapHighlightMoment => {
+  const [, month, day] = toTaipeiDateKey(moment.watchedAt).split("-").map(Number);
   return {
-    granularity: weekly ? "week" : points.every((point) => point.key.length === 10) ? "day" : "month",
-    points,
-    peak: { ...peak }
+    animeSn: moment.animeSn,
+    title: moment.title,
+    episode: moment.episode,
+    coverUrl: moment.coverUrl,
+    dateLabel: `${month}/${day}`,
+    time: taipeiTime(moment.watchedAt)
+  };
+};
+
+const taipeiTime = (date: Date): string => {
+  const minute = ((Math.floor(date.getTime() / 60_000) + 8 * 60) % 1440 + 1440) % 1440;
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+};
+
+const summaryCalendar = (result: AnalyticsResult): RecapSummaryCalendar | null => {
+  const days = result.dailyCounts.map((day) => ({ dateKey: day.dateKey, count: day.count }));
+  const first = days[0];
+  if (!first) return null;
+  const peak = days.reduce((best, day) => day.count > best.count ? day : best, first);
+  if (peak.count <= 0) return null;
+  let longestStreak: RecapSummaryCalendar["longestStreak"] = null;
+  if (result.scope.axis === "watched-at") {
+    let runStart = -1;
+    days.forEach((day, index) => {
+      if (day.count <= 0) {
+        runStart = -1;
+        return;
+      }
+      if (runStart < 0) runStart = index;
+      const length = index - runStart + 1;
+      if (length >= 2 && length > (longestStreak?.days ?? 0)) {
+        longestStreak = { fromDateKey: days[runStart]!.dateKey, toDateKey: day.dateKey, days: length };
+      }
+    });
+  }
+  return {
+    days,
+    activeDayCount: days.filter((day) => day.count > 0).length,
+    peak: { ...peak },
+    longestStreak
   };
 };
 
@@ -377,19 +383,19 @@ export const evaluateRecapPersona = (
   }
 
   const completion = findChapter(chapters, "completion");
-  if (completion && completion.payload.sampledCount > 0) {
-    const { sampledCount, completedCount, tastedCount } = completion.payload;
-    const completedShare = completedCount / sampledCount;
-    if (completedCount >= t.completistMinCount && completedShare >= t.completistShare) {
+  if (completion && completion.payload.startedCount > 0) {
+    const { startedCount, finishedCount, tastedCount } = completion.payload;
+    const completedShare = finishedCount / startedCount;
+    if (finishedCount >= t.completistMinCount && completedShare >= t.completistShare) {
       traits.push({
         key: "completist",
         label: "完食派",
-        reason: `可核對集數的 ${formatInteger(sampledCount)} 部裡，${formatInteger(completedCount)} 部一集不漏`,
+        reason: `從頭開始看的 ${formatInteger(startedCount)} 部裡，${formatInteger(finishedCount)} 部一集不漏`,
         chapterId: "completion",
         strength: strength(completedShare, t.completistShare, t.completistStrongShare)
       });
     }
-    const tastedShare = tastedCount / sampledCount;
+    const tastedShare = tastedCount / startedCount;
     if (tastedCount >= t.samplerMinCount && tastedShare >= t.samplerShare) {
       traits.push({
         key: "sampler",
@@ -414,15 +420,14 @@ export const evaluateRecapPersona = (
     });
   }
 
-  const platform = findChapter(chapters, "platform-taste");
-  const gem = platform?.payload.hiddenGem ?? null;
-  if (gem && gem.personalWatchRank <= t.curatorMaxPersonalRank && gem.gap >= t.curatorMinGap) {
+  const gem = findChapter(chapters, "platform-taste")?.payload.gems[0] ?? null;
+  if (gem) {
     traits.push({
       key: "curator",
       label: "獨到眼光",
-      reason: `你排第 ${formatInteger(gem.personalWatchRank)} 的《${truncateText(gem.title, 14)}》，平台人氣只排第 ${formatInteger(gem.platformRank)}`,
+      reason: `你最先點開的《${truncateText(gem.title, 14)}》，同季你看的 ${formatInteger(gem.cohortSize)} 部裡人氣只排第 ${formatInteger(gem.popularityRank)}`,
       chapterId: "platform-taste",
-      strength: strength(gem.gap, t.curatorMinGap, t.curatorStrongGap)
+      strength: strength(1 - gem.popularityRatio, t.curatorShortfall, t.curatorStrongShortfall)
     });
   }
 

@@ -1,9 +1,11 @@
 import {
+  animeMetadataCacheKey,
   createInvalidMetadata,
   createUnavailableMetadata,
   episodeMetadataCacheKey,
   invalidMetadataCacheKey,
   metadataBundleCacheItems,
+  parseStoredAnimeMetadata,
   readMetadataCache,
   unavailableMetadataCacheKey,
   type MetadataCacheStorage,
@@ -175,7 +177,18 @@ export class MetadataService {
     const videoSn = bundle.episode.videoSn;
     try {
       const result = await this.#coordinator.runCacheOperation(epoch, async () => {
-        await this.#storage.set(metadataBundleCacheItems(bundle));
+        const items = metadataBundleCacheItems(bundle);
+        const animeKey = animeMetadataCacheKey(bundle.anime.animeSn);
+        const saved = await this.#storage.get([animeKey]);
+        if (Object.hasOwn(saved, animeKey)) {
+          try {
+            const current = parseStoredAnimeMetadata(saved[animeKey], bundle.anime.animeSn);
+            if (current.fetchedAt.getTime() > bundle.anime.fetchedAt.getTime()) delete items[animeKey];
+          } catch {
+            // A validated response replaces malformed or obsolete catalog records.
+          }
+        }
+        await this.#storage.set(items);
         await this.#storage.remove([
           unavailableMetadataCacheKey(videoSn),
           invalidMetadataCacheKey(videoSn)

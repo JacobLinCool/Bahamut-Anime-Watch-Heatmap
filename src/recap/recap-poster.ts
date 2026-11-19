@@ -1,14 +1,19 @@
 import {
   formatClockHour,
-  formatCompactDuration,
+  formatEpisodesPerDay,
   formatHourRange,
   formatInteger,
   formatLag,
-  formatPercent
+  formatPercent,
+  truncateText
 } from "../analysis-format";
 import { createButton, element, textElement } from "../view-dom";
 import type {
+  BehaviorPreferencePayload,
+  DropTagPayload,
   HabitClockPayload,
+  HiddenGemPayload,
+  TastePayload,
   MarathonPayload,
   OverviewPayload,
   RecapChapterKind,
@@ -17,6 +22,8 @@ import type {
 } from "./recap-deck";
 import {
   densitySegment,
+  dropTagSentence,
+  outcomeBreakdown,
   durationSegments,
   formatDateKey,
   formatShortDateKey,
@@ -29,19 +36,21 @@ import {
   type QuantitySegment,
   type RecapSceneHandle
 } from "./recap-scenes";
-import type { RecapSummaryLedger, RecapSummaryPeriod, RecapSummaryRhythm } from "./recap-summary";
+import { taipeiWeekday } from "../time";
+import type { RecapHighlight, RecapSummaryCalendar, RecapSummaryPeriod } from "./recap-summary";
 import { phrasedText } from "./recap-text";
 
 // ───────────────────────────── 版面規劃（純函式） ─────────────────────────────
 
 export type PosterTileKind =
   | "hero"
-  | "ledger"
+  | "seasonal-favorites"
   | "habit-clock"
   | "marathon"
   | "timeliness"
   | "behavior-preference"
   | "completion"
+  | "binge"
   | "platform-taste"
   | "taste"
   | "season-breakdown"
@@ -67,12 +76,13 @@ export const POSTER_ROWS = 4;
  */
 export const POSTER_PLACEMENT_ORDER: readonly PosterTileKind[] = Object.freeze([
   "hero",
-  "ledger",
+  "completion",
+  "seasonal-favorites",
   "habit-clock",
   "marathon",
   "timeliness",
   "behavior-preference",
-  "completion",
+  "binge",
   "platform-taste",
   "taste",
   "season-breakdown"
@@ -87,12 +97,13 @@ export const POSTER_FILLER_KINDS: readonly PosterTileKind[] = Object.freeze(["we
 /** 每種磚的內容最多撐得起幾格；尺寸表不得超過，資料少時磚不會被撐成空殼。 */
 export const POSTER_TILE_CAPACITY: Readonly<Record<PosterTileKind, number>> = Object.freeze({
   hero: 48,
-  ledger: 16,
+  "seasonal-favorites": 8,
   "habit-clock": 32,
   marathon: 8,
   timeliness: 8,
   "behavior-preference": 8,
-  completion: 8,
+  completion: 12,
+  binge: 8,
   "platform-taste": 8,
   taste: 8,
   "season-breakdown": 8,
@@ -102,12 +113,13 @@ export const POSTER_TILE_CAPACITY: Readonly<Record<PosterTileKind, number>> = Ob
 /** 每種磚可用的尺寸（欄 × 列），依偏好排序；資料越少，前面的磚越有機會長大。 */
 export const POSTER_TILE_SIZES: Readonly<Record<PosterTileKind, readonly PosterTileSize[]>> = Object.freeze({
   hero: [[4, 4], [6, 4], [8, 4], [12, 4]],
-  ledger: [[4, 3], [4, 4], [4, 2]],
+  "seasonal-favorites": [[4, 2], [8, 1], [6, 1]],
   "habit-clock": [[4, 1], [4, 2], [8, 2], [8, 1], [8, 3], [4, 3], [4, 4], [8, 4], [2, 1]],
   marathon: [[4, 1], [2, 1], [4, 2], [8, 1]],
   timeliness: [[2, 1], [4, 1], [4, 2], [2, 2]],
   "behavior-preference": [[2, 1], [4, 1], [4, 2], [2, 2]],
-  completion: [[2, 1], [4, 1], [4, 2], [2, 2]],
+  completion: [[4, 3], [4, 2], [2, 2], [2, 1]],
+  binge: [[2, 1], [4, 1], [4, 2], [2, 2]],
   "platform-taste": [[2, 1], [4, 1], [4, 2], [2, 2]],
   taste: [[4, 1], [2, 1], [4, 2]],
   "season-breakdown": [[4, 1], [2, 1], [4, 2]],
@@ -199,15 +211,34 @@ const packExactly = (tiles: readonly PosterTileKind[]): PosterPlacement[] | null
   return place(0) ? placements : null;
 };
 
-/** 章節 → 海報磚；英雄磚固定來自總覽，排行榜來自 summary.ledger 指定的章節。 */
+/**
+ * 章節 → 海報磚；英雄磚固定來自總覽。
+ * 有熱度圖時，馬拉松的一天最多與最長連續已經畫在熱度圖上，不再另佔一塊磚；
+ * 但作品資料還沒到、磚很少時留著它，免得英雄磚被撐成一大片空白。
+ */
 export const posterTileKinds = (deck: RecapPresentationDeck): PosterTileKind[] => {
   const kinds: PosterTileKind[] = ["hero"];
-  if (deck.summary.ledger) kinds.push("ledger");
+  const seasonal = hasSeasonalFavorites(deck);
   for (const chapter of deck.chapters) {
     if (chapter.kind === "overview" || chapter.kind === "runtime") continue;
-    kinds.push(chapter.kind);
+    // 四季最愛的封面上已經標了私藏，不再另佔一塊磚。
+    if (chapter.kind === "platform-taste" && seasonal) continue;
+    kinds.push(chapter.kind === "behavior-preference" && seasonal ? "seasonal-favorites" : chapter.kind);
   }
-  return kinds;
+  const others = kinds.filter((kind) => kind !== "hero" && kind !== "marathon").length;
+  return deck.summary.calendar && others >= MIN_TILES_WITHOUT_MARATHON
+    ? kinds.filter((kind) => kind !== "marathon")
+    : kinds;
+};
+
+/** 其他磚至少這麼多塊，海報才不需要馬拉松磚幫忙填版面。 */
+const MIN_TILES_WITHOUT_MARATHON = 3;
+
+/** 至少兩季選得出最愛時，「有得選時先看」改成逐季的四季最愛。 */
+const hasSeasonalFavorites = (deck: RecapPresentationDeck): boolean => {
+  const chapter = deck.chapters.find((candidate) => candidate.kind === "behavior-preference");
+  return chapter?.kind === "behavior-preference"
+    && chapter.payload.seasons.filter((season) => season.rows.length > 0).length >= 2;
 };
 
 /** 可以拿來補白的磚：一週節奏只需要觀看時鐘已有的星期分布。 */
@@ -215,10 +246,10 @@ export const posterFillerKinds = (deck: RecapPresentationDeck): PosterTileKind[]
   deck.summary.weekdayCounts && deck.chapters.some((chapter) => chapter.kind === "habit-clock") ? ["weekday"] : [];
 
 /** 磚 → 點了要回去的章節。 */
-const tileChapterId = (deck: RecapPresentationDeck, kind: PosterTileKind): RecapChapterKind => {
+const tileChapterId = (kind: PosterTileKind): RecapChapterKind => {
   switch (kind) {
     case "hero": return "overview";
-    case "ledger": return deck.summary.ledger?.chapterId ?? "runtime";
+    case "seasonal-favorites": return "behavior-preference";
     case "weekday": return "habit-clock";
     default: return kind;
   }
@@ -231,6 +262,67 @@ export type PosterCallbacks = {
   readonly onPrevious: () => void;
   readonly onDashboard: () => void;
   readonly onGoto: (chapterId: string) => void;
+};
+
+/**
+ * 版面以 1440×900 視窗設計，那時海報是 1374×795。更大的舞台若只把海報拉高，磚會被撐得又高又空，
+ * 所以改成以設計尺寸排版、再整張等比放大（CSS zoom），像一張放大印出的海報。
+ * 比設計尺寸小時照原本的流動版面，不縮小。
+ */
+export const POSTER_DESIGN = Object.freeze({ width: 1374, height: 795, vh: 9, vw: 14.4 });
+/** 只大一點點時不放大：避免 1440×900 附近因為捲軸或小數點在放大與不放大之間跳動。 */
+const MIN_POSTER_ZOOM = 1.04;
+const posterObservers = new WeakMap<HTMLElement, ResizeObserver>();
+
+/** 舞台扣掉內距後能放多大的海報；回傳要放大的倍數，不放大時為 null。 */
+export const posterZoomFor = (availableWidth: number, availableHeight: number): number | null => {
+  const zoom = Math.min(availableWidth / POSTER_DESIGN.width, availableHeight / POSTER_DESIGN.height);
+  return Number.isFinite(zoom) && zoom >= MIN_POSTER_ZOOM ? Math.floor(zoom * 1000) / 1000 : null;
+};
+
+const applyPosterZoom = (scene: HTMLElement, poster: HTMLElement): void => {
+  const style = getComputedStyle(scene);
+  const pixels = (value: string): number => Number.parseFloat(value) || 0;
+  const zoom = posterZoomFor(
+    scene.clientWidth - pixels(style.paddingLeft) - pixels(style.paddingRight),
+    scene.clientHeight - pixels(style.paddingTop) - pixels(style.paddingBottom)
+  );
+  const current = poster.dataset.rcZoom ? Number(poster.dataset.rcZoom) : null;
+  if (zoom === current) return;
+  if (zoom === null) {
+    delete poster.dataset.rcZoom;
+    delete scene.dataset.rcZoomed;
+    for (const property of ["zoom", "width", "height", "--rc-vh", "--rc-vw"]) poster.style.removeProperty(property);
+    return;
+  }
+  poster.dataset.rcZoom = String(zoom);
+  scene.dataset.rcZoomed = "true";
+  poster.style.setProperty("zoom", String(zoom));
+  poster.style.width = `${POSTER_DESIGN.width}px`;
+  poster.style.height = `${POSTER_DESIGN.height}px`;
+  poster.style.setProperty("--rc-vh", `${POSTER_DESIGN.vh}px`);
+  poster.style.setProperty("--rc-vw", `${POSTER_DESIGN.vw}px`);
+};
+
+/**
+ * 在量共享元素的位置之前呼叫：海報的大小要先定案，封面才會飛到放大後的位置。
+ * 之後視窗縮放時由 ResizeObserver 重新套用。
+ */
+export const fitPoster = (scene: HTMLElement): void => {
+  const poster = scene.querySelector<HTMLElement>(":scope > .ani-rc-poster");
+  if (!poster) return;
+  applyPosterZoom(scene, poster);
+  if (posterObservers.has(poster) || typeof ResizeObserver === "undefined") return;
+  const observer = new ResizeObserver(() => {
+    if (!scene.isConnected) {
+      observer.disconnect();
+      posterObservers.delete(poster);
+      return;
+    }
+    applyPosterZoom(scene, poster);
+  });
+  observer.observe(scene);
+  posterObservers.set(poster, observer);
 };
 
 /** 同一個 shadow root 裡可能先後建出好幾張海報：id 用流水號避免撞名。 */
@@ -318,7 +410,7 @@ export const buildSummaryScene = (
   }
 
   poster.append(head, grid);
-  if (summary.rhythm) poster.append(renderRhythm(summary.rhythm, deck, storyOrder.size + 1));
+  if (summary.calendar) poster.append(renderCalendar(summary.calendar, deck, storyOrder.size + 1, callbacks));
   root.append(poster);
 
   return {
@@ -335,12 +427,11 @@ export const buildSummaryScene = (
 /** 磚依故事（章節）順序組裝：總覽在前，最後一章最後。 */
 const storyOrderOf = (deck: RecapPresentationDeck): Map<PosterTileKind, number> => {
   const order = new Map<PosterTileKind, number>([["hero", 0]]);
-  const ledgerChapter = deck.summary.ledger?.chapterId;
   deck.chapters.forEach((chapter, index) => {
     if (chapter.kind === "overview") return;
-    if (chapter.kind === ledgerChapter) order.set("ledger", index);
-    // 片長章只以排行榜的形式出現在海報上。
+    // 片長章不上海報：一部 24 集的作品自然排在前面，說不出什麼；它的封面已經在拼貼裡。
     if (chapter.kind !== "runtime") order.set(chapter.kind, index);
+    if (chapter.kind === "behavior-preference") order.set("seasonal-favorites", index);
     if (chapter.kind === "habit-clock") order.set("weekday", index + 0.5);
   });
   return order;
@@ -371,7 +462,7 @@ const renderTile = (
   id: string,
   callbacks: PosterCallbacks
 ): HTMLElement | null => {
-  const chapterId = tileChapterId(deck, placement.kind);
+  const chapterId = tileChapterId(placement.kind);
   const chapterIndex = deck.chapters.findIndex((chapter) => chapter.id === chapterId);
   const chapter = deck.chapters[chapterIndex];
   const order = storyOrder.get(placement.kind) ?? 0;
@@ -408,9 +499,11 @@ const tileContent = (
   const wide = placement.columnSpan >= 4;
   switch (placement.kind) {
     case "hero": return heroContent(deck, placement, order);
-    case "ledger": return deck.summary.ledger ? ledgerContent(deck.summary.ledger, placement, order) : null;
     case "weekday": return chapter?.kind === "habit-clock" && deck.summary.weekdayCounts
       ? weekdayContent(deck.summary.weekdayCounts, chapter.payload, placement, order)
+      : null;
+    case "seasonal-favorites": return chapter?.kind === "behavior-preference"
+      ? seasonalFavoritesContent(deck, chapter.payload, placement, order)
       : null;
     default: break;
   }
@@ -440,45 +533,68 @@ const tileContent = (
       return {
         label: "有得選時先看",
         blocks: [workLine(leader.title, leader.coverUrl, [
-          `先看率 ${formatPercent(leader.rawWinRate)}`,
-          `${formatInteger(leader.comparisons)} 次比較`
+          `${formatPercent(leader.rawWinRate)} 的時候先看它`,
+          `${formatInteger(leader.decisionBucketCount)} 次有得選`
         ], order + 0.2, true)]
       };
     }
     case "completion": {
       const payload = chapter.payload;
+      // 期間內的作品全都還在播：改用「追到最新」當主數字，看完要等完結才算得出來。
+      const onlyAiring = payload.startedCount === 0;
+      const [count, caption] = onlyAiring
+        ? [payload.caughtUpCount, `追到最新 · 還在播的 ${formatInteger(payload.airingCount)} 部中`]
+        : [payload.finishedCount, `看完 · 從頭開始看的 ${formatInteger(payload.startedCount)} 部中`];
       const head = tileBlock("ani-rc-tile-head", order);
       head.append(
-        quantity([{ value: formatInteger(payload.completedCount), unit: "部", countTo: payload.completedCount }], "ani-rc-tile-value"),
-        textElement("span", "ani-rc-tile-caption", `完食 · 共 ${formatInteger(payload.sampledCount)} 部可核對`)
+        quantity([{ value: formatInteger(count), unit: "部", countTo: count }], "ani-rc-tile-value"),
+        textElement("span", "ani-rc-tile-caption", caption)
       );
       const blocks: HTMLElement[] = [head];
-      if (payload.sampledCount > 0) {
-        const meter = tileBlock("ani-rc-tile-meter", order + 0.3);
-        meter.append(meterBar(payload.completedCount / payload.sampledCount));
-        blocks.push(meter);
+      if (!onlyAiring) blocks.push(outcomeBreakdown(payload, order + 0.3));
+      // 大磚有空間時，把各類型的放棄比例畫出來；句子就不必再說一次。
+      const table = placement.rowSpan >= 3 ? tagDropTable(payload.tagDrops, order + 0.45) : null;
+      if (table) blocks.push(table);
+      const nearest = payload.nearlyRows[0];
+      const notes = [
+        table ? null : dropTagSentence(payload),
+        nearest ? `差一點就看完：《${nearest.title}》只差 ${formatInteger(nearest.totalEpisode - nearest.watchedEpisodeCount)} 集` : null,
+        !onlyAiring && payload.caughtUpCount > 0 ? `還在播的作品裡，有 ${formatInteger(payload.caughtUpCount)} 部追到最新` : null
+      ].filter((text): text is string => text !== null);
+      const room = placement.rowSpan >= 3 ? (table ? 2 : 3) : placement.rowSpan >= 2 ? 1 : 0;
+      if (room > 0 && notes.length > 0) {
+        const list = part("ul", "ani-rc-tile-notes", "fade", order + 0.5);
+        for (const text of notes.slice(0, room)) list.append(textElement("li", "", text));
+        blocks.push(list);
       }
-      if (payload.tastedCount > 0) blocks.push(tileFoot(`另有 ${formatInteger(payload.tastedCount)} 部只看了一集`, order + 0.4));
-      return { label: "完食清單", blocks };
+      return { label: "追番成績單", blocks };
+    }
+    case "binge": {
+      const leader = chapter.payload.rows[0];
+      if (!leader) return null;
+      return {
+        label: "補番速度",
+        blocks: [workLine(leader.title, leader.coverUrl, [
+          `平均 ${formatEpisodesPerDay(leader.episodesPerDay)}`
+        ], order + 0.2, true)]
+      };
     }
     case "platform-taste": {
-      const payload = chapter.payload;
-      const lead = payload.hiddenGem ?? payload.rows[0];
-      if (!lead) return null;
-      // 兩個名次併成一行，第二行說出差距（或次數），小磚的下半部不會空著。
+      const gem = chapter.payload.gems[0];
+      if (!gem) return null;
       return {
-        label: payload.hiddenGem ? "你的私藏" : "你最常看",
-        blocks: [workLine(lead.title, lead.coverUrl, [
-          `你 #${formatInteger(lead.personalWatchRank)} · 平台 #${formatInteger(lead.platformRank)}`,
-          payload.hiddenGem
-            ? `排得比大眾前面 ${formatInteger(payload.hiddenGem.gap)} 名`
-            : `看了 ${formatInteger(lead.personalWatchCount)} 次`
+        label: "你的私藏",
+        blocks: [workLine(gem.title, gem.coverUrl, [
+          `同季人氣第 ${formatInteger(gem.popularityRank)} / ${formatInteger(gem.cohortSize)}`,
+          `約同季最熱門的 ${formatPercent(gem.popularityRatio)}`
         ], order + 0.2, true)]
       };
     }
     case "taste": {
       const payload = chapter.payload;
       const leaderLabel = payload.tags.length > 0 ? "最常看的類型" : payload.makers.length > 0 ? "最常看的製作方" : "口味";
+      // 大磚：標籤換成有部數長條的排行，旁邊列出製作名單，不留一大片空白。
+      if (roomy && wide && payload.tags.length >= 3) return { label: leaderLabel, blocks: [tasteBoard(payload, order + 0.2)] };
       const chips = part("ul", "ani-rc-chips", "rise", order + 0.2);
       const chipSource = payload.tags.length > 0 ? payload.tags : payload.makers.length > 0 ? payload.makers : payload.directors.length > 0 ? payload.directors : payload.publishers;
       // 放不下的標籤整顆換到被裁掉的下一排，不會出現半顆。
@@ -488,11 +604,11 @@ const tileContent = (
         chips.append(chip);
       });
       const blocks: HTMLElement[] = [chips];
-      // 第一名的份量：幾部作品、幾次觀看，填在標籤與製作名單之間。
+      // 第一名的份量：幾部作品，填在標籤與製作名單之間。
       const top = chipSource[0];
       if (top) {
         const lead = tileBlock("ani-rc-taste-lead", order + 0.3);
-        lead.textContent = `${top.label} · ${formatInteger(top.animeCount)} 部作品 · ${formatInteger(top.watchCount)} 次觀看`;
+        lead.textContent = `${top.label} · ${formatInteger(top.animeCount)} 部作品`;
         blocks.push(lead);
       }
       const credits = tileBlock("ani-rc-credits", order + 0.4);
@@ -527,7 +643,7 @@ const tileContent = (
         column.append(
           track,
           textElement("span", "ani-rc-mini-season-name", row.label.replace(/^\d+\s*/, "").replace("季", "")),
-          textElement("span", "ani-rc-mini-season-count", `${formatInteger(row.watchCount)} 次`)
+          textElement("span", "ani-rc-mini-season-count", `${formatInteger(row.watchCount)} 集`)
         );
         chart.append(column);
       }
@@ -536,6 +652,113 @@ const tileContent = (
     default:
       return null;
   }
+};
+
+/** 大的口味磚：左邊前五名類型（依部數，附長條），右邊動畫公司、導演、代理商各自的第一名。 */
+const tasteBoard = (payload: TastePayload, order: number): HTMLElement => {
+  const board = tileBlock("ani-rc-taste-board", order);
+  const tags = payload.tags.slice(0, 5);
+  const max = Math.max(1, ...tags.map((tag) => tag.animeCount));
+  const list = element("ol", "ani-rc-taste-bars");
+  for (const tag of tags) {
+    const item = element("li", "ani-rc-bar-row");
+    item.append(
+      textElement("span", "ani-rc-drop-label", tag.label),
+      meterBar(tag.animeCount / max),
+      textElement("span", "ani-rc-drop-value", `${formatInteger(tag.animeCount)} 部`)
+    );
+    list.append(item);
+  }
+  const credits = element("ul", "ani-rc-taste-credits");
+  const creditRows: readonly [string, TastePayload["makers"][number] | undefined][] = [
+    ["動畫公司", payload.makers[0]],
+    ["導演", payload.directors[0]],
+    ["代理商", payload.publishers[0]]
+  ];
+  for (const [label, row] of creditRows) {
+    if (!row) continue;
+    const item = element("li", "ani-rc-taste-credit");
+    item.append(
+      textElement("span", "ani-rc-credit-label", label),
+      textElement("strong", "ani-rc-taste-credit-value", row.label),
+      textElement("span", "ani-rc-taste-credit-meta", `${formatInteger(row.animeCount)} 部作品`)
+    );
+    credits.append(item);
+  }
+  board.append(list);
+  if (credits.childElementCount > 0) board.append(credits);
+  return board;
+};
+
+/**
+ * 各類型的放棄比例：類型太多時列最常放棄的三個，再接最能看完的一個，讓兩端的對比留在畫面上。
+ * 少於三個類型時不畫，比例條沒有可以比較的對象。
+ */
+const tagDropTable = (tags: readonly DropTagPayload[], order: number): HTMLElement | null => {
+  if (tags.length < 3) return null;
+  const shown = tags.length > 4 ? [...tags.slice(0, 3), tags.at(-1)!] : tags;
+  const block = tileBlock("ani-rc-drops", order);
+  block.append(textElement("span", "ani-rc-drops-title", "各類型的放棄比例"));
+  const list = element("ol", "ani-rc-drops-list");
+  shown.forEach((tag, index) => {
+    const item = element("li", "ani-rc-drop");
+    if (tags.length > 4 && index === 3) item.dataset.gap = "true";
+    item.append(
+      textElement("span", "ani-rc-drop-label", tag.label),
+      // 依實際比例畫：放棄三成的類型不該畫成滿格。
+      meterBar(tag.dropRate),
+      textElement("span", "ani-rc-drop-value", `${formatInteger(tag.droppedCount)} / ${formatInteger(tag.startedCount)} 部`)
+    );
+    list.append(item);
+  });
+  block.append(list);
+  return block;
+};
+
+/**
+ * 四季最愛：每季一欄、前三名的封面，下面寫第一名的作品名。私藏的封面加框並掛上標籤，
+ * 底部用一行說明它為什麼算私藏。窄而高的磚排成兩欄兩列，寬而矮的排成一列。
+ */
+const seasonalFavoritesContent = (
+  deck: RecapPresentationDeck,
+  payload: BehaviorPreferencePayload,
+  placement: PosterPlacement,
+  order: number
+): TileSpec => {
+  const platform = deck.chapters.find((chapter) => chapter.kind === "platform-taste");
+  const gems = new Map((platform?.kind === "platform-taste" ? platform.payload.gems : []).map((gem) => [gem.animeSn, gem]));
+  const board = tileBlock("ani-rc-fav-board", order + 0.2);
+  board.dataset.layout = placement.rowSpan >= 2 ? "grid" : "row";
+  board.style.setProperty("--rc-seasons", String(payload.seasons.length));
+  let shownGem: HiddenGemPayload | null = null;
+  for (const season of payload.seasons) {
+    const column = element("section", "ani-rc-fav-season");
+    column.append(textElement("span", "ani-rc-fav-season-name", season.label));
+    const leader = season.rows[0];
+    if (!leader) {
+      column.append(textElement("span", "ani-rc-fav-empty", "還看不出來"));
+    } else {
+      const covers = element("ol", "ani-rc-fav-covers");
+      for (const row of season.rows) {
+        const item = element("li", "ani-rc-fav-item");
+        item.append(recapCover(row.coverUrl, row.title, "ani-rc-fav-cover"));
+        const gem = gems.get(row.animeSn);
+        if (gem) {
+          item.dataset.gem = "true";
+          item.append(textElement("span", "ani-rc-fav-gem", "私藏"));
+          shownGem ??= gem;
+        }
+        covers.append(item);
+      }
+      column.append(covers, textElement("span", "ani-rc-fav-title", leader.title));
+    }
+    board.append(column);
+  }
+  const blocks: HTMLElement[] = [board];
+  if (shownGem) {
+    blocks.push(tileFoot(`私藏《${shownGem.title}》：同季 ${formatInteger(shownGem.cohortSize)} 部裡人氣第 ${formatInteger(shownGem.popularityRank)}`, order + 0.6));
+  }
+  return { label: payload.seasons.length === 4 ? "四季最愛" : "每季最愛", blocks };
 };
 
 const clockContent = (
@@ -600,10 +823,10 @@ const marathonContent = (
   const blocks: HTMLElement[] = [];
   const peak = tileBlock("ani-rc-tile-head", order);
   peak.append(
-    quantity([{ value: formatInteger(payload.peakDay.watchCount), unit: "次", countTo: payload.peakDay.watchCount }], "ani-rc-tile-value"),
+    quantity([{ value: formatInteger(payload.peakDay.watchCount), unit: "集", countTo: payload.peakDay.watchCount }], "ani-rc-tile-value"),
     textElement("span", "ani-rc-tile-caption", roomy
-      ? `單日最高 · ${formatDateKey(payload.peakDay.dateKey)}`
-      : `單日最高 · ${formatShortDateKey(payload.peakDay.dateKey)}`)
+      ? `一天最多 · ${formatDateKey(payload.peakDay.dateKey)}`
+      : `一天最多 · ${formatShortDateKey(payload.peakDay.dateKey)}`)
   );
   const pair = element("span", "ani-rc-tile-pair");
   pair.append(peak);
@@ -622,7 +845,7 @@ const marathonContent = (
     const minutesBlock = tileBlock("ani-rc-tile-head", order + 0.45);
     minutesBlock.append(
       quantity(durationSegments(payload.peakDay.knownContentMinutes), "ani-rc-tile-value"),
-      textElement("span", "ani-rc-tile-caption", "當日已知片長")
+      textElement("span", "ani-rc-tile-caption", "當天觀看時間")
     );
     pair.append(minutesBlock);
   }
@@ -706,7 +929,7 @@ const weekdayContent = (
   const head = tileBlock("ani-rc-tile-head", order);
   head.append(
     textElement("strong", "ani-rc-tile-value ani-rc-tile-word", top.label),
-    textElement("span", "ani-rc-tile-caption", `${formatInteger(top.watchCount)} 次 · 一週裡最常看`)
+    textElement("span", "ani-rc-tile-caption", `${formatInteger(top.watchCount)} 集 · 一週裡最常看`)
   );
   const pair = element("span", "ani-rc-tile-pair");
   pair.append(head);
@@ -756,23 +979,72 @@ const heroContent = (deck: RecapPresentationDeck, placement: PosterPlacement, or
     ? summary.hero.minutes >= 100 * 60
       ? durationSegments(summary.hero.minutes, "runtime-total").slice(0, 1)
       : durationSegments(summary.hero.minutes, "runtime-total")
-    : [{ value: formatInteger(summary.hero.count), unit: "次", countTo: summary.hero.count, countKey: "watch-count" }];
+    : [{ value: formatInteger(summary.hero.count), unit: "集", countTo: summary.hero.count, countKey: "watch-count" }];
   hero.dataset.rcShared = summary.hero.kind === "known-runtime" ? "metric-runtime" : "metric-watch";
   const figure = quantity(segments, "ani-rc-hero-figure");
   const length = segments.reduce((sum, segment) => sum + [...segment.value].length + [...(segment.unit ?? "")].length * 0.4, 0);
   if (length > 6.5) figure.dataset.long = "true";
   hero.append(
     figure,
-    textElement("span", "ani-rc-hero-note", summary.hero.kind === "known-runtime" ? "已知片長合計" : "觀看次數")
+    textElement("span", "ani-rc-hero-note", summary.hero.kind === "known-runtime" ? "觀看時間" : "看過的集數")
   );
   blocks.push(hero);
+  if (summary.highlights.length > 0) blocks.push(highlightsBlock(summary.highlights, order + 0.7));
   if (overview && overview.kind === "overview") {
     const payload = overview.payload;
-    const meter = activeDaysMeter(payload, summary.period, order + 0.75);
+    // 有熱度圖時，「幾天有看」寫在熱度圖旁，英雄磚不再重複。
+    const meter = summary.calendar ? null : activeDaysMeter(payload, summary.period, order + 0.75);
     if (meter) blocks.push(meter);
-    blocks.push(heroKpis(payload, summary, placement, meter !== null, order + 0.9));
+    blocks.push(heroKpis(payload, summary, placement, meter !== null || summary.calendar !== null, order + 0.9));
   }
   return { label: `${deck.scope.label}的你`, blocks };
+};
+
+/** 只對這個人成立的亮點：封面縮圖加一句話，沒過門檻的根本不會進來。 */
+const highlightsBlock = (highlights: readonly RecapHighlight[], order: number): HTMLElement => {
+  const list = part("ul", "ani-rc-highlights", "rise", order);
+  for (const highlight of highlights) {
+    const [label, text, coverUrl, coverTitle] = highlightCopy(highlight);
+    const item = element("li", "ani-rc-highlight");
+    item.dataset.kind = highlight.kind;
+    const copy = element("span", "ani-rc-highlight-copy");
+    copy.append(textElement("span", "ani-rc-highlight-label", label), phrasedText("span", "ani-rc-highlight-text", text));
+    item.append(recapCover(coverUrl, coverTitle, "ani-rc-highlight-cover"), copy);
+    list.append(item);
+  }
+  return list;
+};
+
+const highlightCopy = (highlight: RecapHighlight): readonly [label: string, text: string, coverUrl: string | null, coverTitle: string] => {
+  const work = (title: string): string => `《${truncateText(title, 12)}》`;
+  switch (highlight.kind) {
+    case "new-year": {
+      const { before, after } = highlight;
+      const lead = after ?? before!;
+      const text = before && after
+        ? `${before.time} 還在看${work(before.title)}${before.episode}，過了午夜 ${after.time} 接著看${work(after.title)}${after.episode}`
+        : after
+          ? `新年第一集：${after.time}${work(after.title)}${after.episode}`
+          : `跨年那一刻，你在看${work(lead.title)}${lead.episode}（${lead.time}）`;
+      return [`看著動畫跨進 ${highlight.year}`, text, lead.coverUrl, lead.title];
+    }
+    case "dawn": {
+      const { last } = highlight;
+      return [
+        "天亮了還在看",
+        `${last.dateLabel} 從 ${highlight.startTime} 一路看了 ${formatInteger(highlight.episodeCount)} 集，最後是早上 ${last.time} 的${work(last.title)}${last.episode}`,
+        last.coverUrl,
+        last.title
+      ];
+    }
+    case "old-works":
+      return [
+        "補舊作",
+        `看了 ${formatInteger(highlight.workCount)} 部開播兩年以上的作品，最老的是 ${highlight.oldest.premiereYear} 年的${work(highlight.oldest.title)}`,
+        highlight.oldest.coverUrl,
+        highlight.oldest.title
+      ];
+  }
 };
 
 /** 有觀看（或有上架）的日子占整段期間多少：取代單獨的「觀看日」數字。 */
@@ -810,12 +1082,12 @@ const heroKpis = (
   // 沒有重看時「觀看」與「不同單集」是同一個數字：換成日均密度，不重複佔位。
   const rewatchCount = payload.watchCount - payload.uniqueEpisodeCount;
   const hasAnime = payload.identifiableAnimeCount > 0;
-  const watchCell: KpiCell = ["次觀看", [{ value: formatInteger(payload.watchCount), countTo: payload.watchCount, countKey: "watch-count" }], "metric-watch"];
+  const watchCell: KpiCell = ["集", [{ value: formatInteger(payload.watchCount), countTo: payload.watchCount, countKey: "watch-count" }], "metric-watch"];
   const episodeCell: KpiCell = ["不同單集", [{ value: formatInteger(payload.uniqueEpisodeCount), countTo: payload.uniqueEpisodeCount, countKey: "episode-count" }], undefined];
   const rewatchCell: KpiCell = ["重看", [{ value: formatInteger(rewatchCount), unit: "次", countTo: rewatchCount }], undefined];
   const animeCell: KpiCell = ["部作品", [{ value: formatInteger(payload.identifiableAnimeCount), countTo: payload.identifiableAnimeCount, countKey: "anime-count" }], "metric-anime"];
   const daysCell: KpiCell = [activeDayLabel, [{ value: formatInteger(payload.activeDayCount), unit: "天", countTo: payload.activeDayCount, countKey: "active-days" }], "metric-days"];
-  const densityCell: KpiCell = [`平均每個${activeDayLabel}`, [densitySegment(payload.watchCount, payload.activeDayCount)], undefined];
+  const densityCell: KpiCell = [payload.axis === "released-at" ? "有上架的日子平均" : "有看的日子平均", [densitySegment(payload.watchCount, payload.activeDayCount)], undefined];
   const weeks = summary.period.dayCount / 7;
   const weeklyCell: KpiCell = ["平均每週", [densitySegment(payload.watchCount, weeks)], undefined];
   const candidates: KpiCell[] = summary.hero.kind === "known-runtime"
@@ -834,40 +1106,6 @@ const heroKpis = (
     kpis.append(cell);
   });
   return kpis;
-};
-
-const ledgerContent = (ledger: RecapSummaryLedger, placement: PosterPlacement, order: number): TileSpec => {
-  const rowLimit = Math.max(2, Math.min(5, placement.rowSpan + 2));
-  const max = Math.max(...ledger.rows.map((row) => row.value), 0) || 1;
-  const list = element("ol", "ani-rc-ledger-list");
-  ledger.rows.slice(0, rowLimit).forEach((row, index) => {
-    const line = part("li", "ani-rc-ledger-row", "rise", order + 0.2 + index * 0.3);
-    const copy = element("span", "ani-rc-ledger-copy");
-    copy.append(phrasedText("span", "ani-rc-ledger-title", row.title));
-    const meta = row.watchCount !== null && ledger.metric !== "watch-count"
-      ? `${formatInteger(row.watchCount)} 次觀看`
-      : null;
-    if (meta) copy.append(textElement("span", "ani-rc-ledger-meta", meta));
-    copy.append(meterBar(ledger.metric === "median-lag" ? (ledger.rows[0]!.value + 1) / (row.value + 1) : row.value / max));
-    line.append(
-      textElement("span", "ani-rc-ledger-rank", String(row.rank)),
-      recapCover(row.coverUrl, row.title, "ani-rc-ledger-cover"),
-      copy,
-      textElement("span", "ani-rc-ledger-value", ledgerValue(ledger, row.value))
-    );
-    list.append(line);
-  });
-  return { label: ledger.label, blocks: [list] };
-};
-
-const ledgerValue = (ledger: RecapSummaryLedger, value: number): string => {
-  switch (ledger.metric) {
-    case "known-minutes": return formatCompactDuration(value);
-    case "watch-count": return `${formatInteger(value)} 次`;
-    case "win-rate":
-    case "completion": return formatPercent(value);
-    case "median-lag": return formatLag(value);
-  }
 };
 
 /**
@@ -923,52 +1161,135 @@ const weekdayStrip = (counts: readonly number[], topWeekday: number, order: numb
   return strip;
 };
 
-const renderRhythm = (rhythm: RecapSummaryRhythm, deck: RecapPresentationDeck, order: number): HTMLElement => {
-  const figure = part("figure", "ani-rc-rhythm", "rise", order);
-  figure.dataset.granularity = rhythm.granularity;
-  // 節奏條沿用擴充功能熱度圖的天藍色。
+/**
+ * 熱度圖的四階顏色。一年裡總有幾天特別瘋狂：若照最大值等分，其他日子會全擠在最淺的一階，
+ * 所以改用有看的日子的四分位數分級；最多只看幾集時，直接一集一階。
+ */
+const calendarLevels = (days: readonly { readonly count: number }[]): ((count: number) => number) => {
+  const counts = days.map((day) => day.count).filter((count) => count > 0).sort((left, right) => left - right);
+  const max = counts.at(-1) ?? 0;
+  if (max <= 4) return (count) => Math.max(0, Math.min(4, count));
+  const quantile = (ratio: number): number => counts[Math.min(counts.length - 1, Math.floor(ratio * counts.length))]!;
+  const [q1, q2, q3] = [quantile(0.25), quantile(0.5), quantile(0.75)];
+  return (count) => count <= 0 ? 0 : count <= q1 ? 1 : count <= q2 ? 2 : count <= q3 ? 3 : 4;
+};
+
+/**
+ * 整段期間的熱度圖：一天一格、一欄一週（週日在上）。
+ * 一天最多的那格加框，最長連續在格子下方畫一條亮帶；兩者的數字寫在右側，
+ * 不需要另外的圖例。
+ */
+/** 這麼短的期間改用一列一天的熱度圖。 */
+const CALENDAR_STRIP_MAX_DAYS = 62;
+
+const renderCalendar = (
+  calendar: RecapSummaryCalendar,
+  deck: RecapPresentationDeck,
+  order: number,
+  callbacks: PosterCallbacks
+): HTMLElement => {
+  const releaseAxis = deck.scope.axis === "released-at";
+  const figure = part("figure", "ani-rc-calendar", "rise", order);
+  // 沿用擴充功能熱度圖的天藍色。
   figure.dataset.tone = "overview";
-  const caption = element("figcaption", "ani-rc-rhythm-caption");
-  caption.append(
-    textElement("span", "ani-rc-tile-label", rhythm.granularity === "week" ? "每週節奏" : "觀看節奏"),
-    textElement("strong", "ani-rc-rhythm-peak", `${rhythmLabel(rhythm.peak.key, rhythm.granularity)}最多`),
-    textElement("span", "ani-rc-rhythm-detail", `${formatInteger(rhythm.peak.count)} 次${deck.scope.axis === "released-at" ? " · 依上架時間" : ""}`)
+
+  const total = calendar.days.length;
+  const caption = element("figcaption", "ani-rc-calendar-caption");
+  const days = element("strong", "ani-rc-calendar-days");
+  days.append(
+    textElement("span", "", formatInteger(calendar.activeDayCount)),
+    textElement("span", "ani-rc-calendar-total", `/ ${formatInteger(total)} 天`)
   );
-  const chart = element("div", "ani-rc-rhythm-chart");
+  caption.append(
+    textElement("span", "ani-rc-tile-label", "每一天"),
+    days,
+    textElement("span", "ani-rc-calendar-detail", `${releaseAxis ? "有上架集數" : "有看動畫"} · ${formatPercent(calendar.activeDayCount / Math.max(1, total))}`)
+  );
+
+  const chart = element("div", "ani-rc-calendar-chart");
   chart.setAttribute("aria-hidden", "true");
-  chart.style.setProperty("--rc-points", String(rhythm.points.length));
-  const bars = element("div", "ani-rc-rhythm-bars");
-  const ticks = element("div", "ani-rc-rhythm-ticks");
-  const max = Math.max(1, rhythm.peak.count);
-  rhythm.points.forEach((point, index) => {
-    const bar = element("span", "ani-rc-rhythm-bar");
-    bar.dataset.rcBar = "true";
-    bar.dataset.peak = String(point.key === rhythm.peak.key);
-    bar.dataset.empty = String(point.count === 0);
-    bar.style.setProperty("--rc-level", String(point.count / max));
-    bar.title = `${rhythmLabel(point.key, rhythm.granularity)} · ${formatInteger(point.count)} 次`;
-    bars.append(bar);
-    ticks.append(textElement("span", "", rhythmTick(point.key, rhythm.granularity, index)));
+  // 兩個月以內的期間只有幾欄：改成一天一格排成一列，才不會縮成角落的一小塊。
+  const strip = total <= CALENDAR_STRIP_MAX_DAYS;
+  figure.dataset.layout = strip ? "strip" : "weeks";
+  const firstKey = calendar.days[0]!.dateKey;
+  const lead = strip ? 0 : taipeiWeekday(firstKey);
+  const weekCount = Math.ceil((lead + total) / 7);
+  const columnCount = strip ? total : weekCount;
+  chart.style.setProperty("--rc-columns", String(columnCount));
+  const weekOf = (index: number): number => strip ? index : Math.floor((lead + index) / 7);
+
+  const months = element("div", "ani-rc-calendar-months");
+  const monthLabels = calendar.days.flatMap((day, index) => {
+    const dayOfMonth = Number(day.dateKey.slice(8, 10));
+    const month = Number(day.dateKey.slice(5, 7));
+    if (strip) {
+      // 一列的版本標日期：第一天、每月一號，其餘每五天一個。
+      if (index === 0 || dayOfMonth === 1) return [{ column: index, text: `${month}/${dayOfMonth}` }];
+      return dayOfMonth % 5 === 0 ? [{ column: index, text: String(dayOfMonth) }] : [];
+    }
+    if (index !== 0 && dayOfMonth !== 1) return [];
+    // 第一天落在週中時，月份標在下一欄。
+    const column = index === 0 && lead > 3 ? weekOf(index) + 1 : weekOf(index);
+    return column < weekCount ? [{ column, text: `${month}月` }] : [];
   });
-  chart.append(bars, ticks);
-  figure.append(caption, chart);
+  // 期間從月底開始時，第一個月份離下個月太近：省略它，不讓兩個標籤疊在一起。
+  monthLabels.forEach((month, index) => {
+    const following = monthLabels[index + 1];
+    if (following && following.column - month.column < 3) return;
+    const label = textElement("span", "", month.text);
+    label.style.gridColumn = String(month.column + 1);
+    months.append(label);
+  });
+
+  const level = calendarLevels(calendar.days);
+  const grid = element("div", "ani-rc-calendar-grid");
+  const streak = calendar.longestStreak;
+  const inStreak = (key: string): boolean => streak !== null && key >= streak.fromDateKey && key <= streak.toDateKey;
+  for (let pad = 0; pad < lead; pad += 1) {
+    const blank = element("span", "ani-rc-cal-day");
+    blank.dataset.pad = "true";
+    grid.append(blank);
+  }
+  for (const day of calendar.days) {
+    const cell = element("span", "ani-rc-cal-day");
+    cell.dataset.level = String(level(day.count));
+    if (day.dateKey === calendar.peak.dateKey) cell.dataset.peak = "true";
+    if (inStreak(day.dateKey)) cell.dataset.streak = "true";
+    cell.title = `${formatShortDateKey(day.dateKey)} · ${formatInteger(day.count)} 集`;
+    grid.append(cell);
+  }
+  chart.append(months, grid);
+  if (streak) {
+    const band = element("div", "ani-rc-calendar-band");
+    const bar = element("span", "ani-rc-calendar-streak");
+    const fromIndex = calendar.days.findIndex((day) => day.dateKey === streak.fromDateKey);
+    const toIndex = calendar.days.findIndex((day) => day.dateKey === streak.toDateKey);
+    bar.style.gridColumn = `${weekOf(fromIndex) + 1} / ${weekOf(toIndex) + 2}`;
+    band.append(bar);
+    chart.append(band);
+  }
+
+  const facts = element("ul", "ani-rc-calendar-facts");
+  const fact = (mark: "streak" | "peak", value: string, label: string): HTMLElement => {
+    const item = element("li", "ani-rc-calendar-fact");
+    item.dataset.mark = mark;
+    const swatch = element("span", "ani-rc-calendar-mark");
+    swatch.setAttribute("aria-hidden", "true");
+    item.append(swatch, textElement("strong", "", value), textElement("span", "", label));
+    return item;
+  };
+  if (streak) {
+    facts.append(fact("streak", `${formatInteger(streak.days)} 天`, `最長連續 · ${formatShortDateKey(streak.fromDateKey)}–${formatShortDateKey(streak.toDateKey)}`));
+  }
+  facts.append(fact("peak", `${formatInteger(calendar.peak.count)} 集`, `${releaseAxis ? "上架最多的一天" : "一天最多"} · ${formatShortDateKey(calendar.peak.dateKey)}`));
+
+  figure.append(caption, chart, facts);
+  // 熱度圖接手了馬拉松磚：點它回到馬拉松章（沒有時回到總覽）。
+  const marathonIndex = deck.chapters.findIndex((chapter) => chapter.kind === "marathon");
+  const index = marathonIndex >= 0 ? marathonIndex : deck.chapters.findIndex((chapter) => chapter.kind === "overview");
+  const target = deck.chapters[index];
+  if (target) figure.append(stretchedLink(index, target, () => callbacks.onGoto(target.id)));
   return figure;
-};
-
-const rhythmLabel = (key: string, granularity: RecapSummaryRhythm["granularity"]): string => {
-  const [year, month, day] = key.split("-").map(Number);
-  if (granularity === "month") return `${year} 年 ${month} 月`;
-  if (granularity === "week") return `${month}/${day} 起的那一週`;
-  return `${month} 月 ${day} 日`;
-};
-
-const rhythmTick = (key: string, granularity: RecapSummaryRhythm["granularity"], index: number): string => {
-  const [, month, day] = key.split("-").map(Number);
-  if (granularity === "month") return `${month}月`;
-  if (granularity === "week") return `${month}/${day}`;
-  // 日刻度：每月第一天標月份，其餘每 5 天標一次日期，避免擠成一團。
-  if (day === 1 || index === 0) return `${month}/${day}`;
-  return (day ?? 0) % 5 === 0 ? String(day) : "";
 };
 
 const segmentKeyForHour = (hour: number): string => {

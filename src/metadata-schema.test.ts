@@ -26,6 +26,7 @@ const apiValue = (videoSn = 49054): Record<string, unknown> => ({
       animeSn: 114010,
       title: "API 作品標題 [9]",
       totalEpisode: 13,
+      flag: 0,
       seasonStart: "2026/04/02",
       seasonEnd: "2026/07/02",
       episodeIndex: 8,
@@ -73,6 +74,7 @@ test("parseMetadataResponse returns one strict episode plus one normalized anime
     animeSn: 114010,
     apiTitle: "API 作品標題 [9]",
     totalEpisode: 13,
+    isOngoing: false,
     seasonStartDateKey: "2026-04-02",
     seasonEndDateKey: "2026-07-02",
     coverUrl: "https://p2.bahamut.com.tw/anime.JPG",
@@ -353,4 +355,26 @@ test("cloneMetadataBundle deeply isolates dates and arrays", () => {
   assert.notEqual(clone.anime.tags, source.anime.tags);
   assert.notEqual(clone.anime.episodeRefs, source.anime.episodeRefs);
   assert.notEqual(clone.anime.platformSnapshot.observedAt, source.anime.platformSnapshot.observedAt);
+});
+
+test("an open-ended season end marks a series that is still airing, not a year-2100 finale", () => {
+  const value = apiValue() as { data: { anime: Record<string, unknown> } };
+  value.data.anime.seasonEnd = "2100/12/31";
+  const parsed = parseMetadataResponse(value, 49054);
+  assert.equal(parsed.anime.seasonEndDateKey, null);
+  assert.equal(parsed.anime.isOngoing, true);
+  assert.equal(parsed.anime.seasonStartDateKey, "2026-04-02");
+});
+
+test("an unknown or past season end is not treated as airing, whatever the flag says", () => {
+  for (const [seasonEnd, seasonEndDateKey] of [["0000/00/00", null], ["2026/06/30", "2026-06-30"]] as const) {
+    for (const flag of [0, 1, 3]) {
+      const value = apiValue() as { data: { anime: Record<string, unknown> } };
+      value.data.anime.seasonEnd = seasonEnd;
+      value.data.anime.flag = flag;
+      const parsed = parseMetadataResponse(value, 49054);
+      assert.equal(parsed.anime.isOngoing, false, `${seasonEnd} flag=${flag}`);
+      assert.equal(parsed.anime.seasonEndDateKey, seasonEndDateKey);
+    }
+  }
 });

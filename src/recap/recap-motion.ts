@@ -1,5 +1,6 @@
 import { formatCompactDuration, formatDuration, formatInteger } from "../analysis-format";
 import type { RecapDirection } from "./recap-state";
+import { fitPoster } from "./recap-poster";
 import { fitHeadlines } from "./recap-text";
 
 export const RC_EASE_OUT = "cubic-bezier(.16, 1, .3, 1)";
@@ -74,6 +75,20 @@ export const flipDelta = (first: RectLike, last: RectLike): FlipDelta => ({
 
 export const flipTransform = (delta: FlipDelta): string =>
   `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})`;
+
+/**
+ * 元素實際的 CSS zoom。大螢幕上海報整張放大時，量到的位置是畫面上的像素，
+ * 但寫回元素的位移與寬度會再被 zoom 乘一次，所以要先換回元素自己的座標。
+ */
+export const cssZoom = (element: Element): number => {
+  const zoom = (element as Element & { readonly currentCSSZoom?: number }).currentCSSZoom;
+  return typeof zoom === "number" && zoom > 0 ? zoom : 1;
+};
+
+const localDelta = (delta: FlipDelta, element: Element): FlipDelta => {
+  const zoom = cssZoom(element);
+  return zoom === 1 ? delta : { ...delta, dx: round(delta.dx / zoom), dy: round(delta.dy / zoom) };
+};
 
 export const isNoopFlip = (delta: FlipDelta): boolean =>
   Math.abs(delta.dx) < 0.5 && Math.abs(delta.dy) < 0.5
@@ -175,8 +190,9 @@ export class RecapChoreographer {
     // WRITE
     if (previous) markLeaving(previous);
     this.#viewport.append(next);
-    // 標題字級要在量位置之前定案，否則共享元素會飛到縮字前的位置。
+    // 標題字級與海報的放大倍數要在量位置之前定案，否則共享元素會飛到縮放前的位置。
     fitHeadlines(next);
+    fitPoster(next);
     if (!animate) {
       previous?.remove();
       return null;
@@ -306,7 +322,7 @@ export class RecapChoreographer {
   }
 
   #flip(flip: PendingFlip): void {
-    const delta = flipDelta(flip.first, flip.last);
+    const delta = localDelta(flipDelta(flip.first, flip.last), flip.element);
     if (isNoopFlip(delta)) return;
     flip.element.style.transformOrigin = "0 0";
     this.#track(flip.element.animate(
@@ -317,8 +333,8 @@ export class RecapChoreographer {
 
   /** 接力：新封面框從舊封面的位置彈到定位，舊封面的圖蓋在框裡淡出。 */
   #passBaton(baton: PendingBaton): void {
-    const delta = flipDelta(baton.first, baton.last);
     const element = baton.element;
+    const delta = localDelta(flipDelta(baton.first, baton.last), element);
     if (!isNoopFlip(delta)) {
       element.style.transformOrigin = "0 0";
       this.#track(element.animate(
@@ -361,7 +377,7 @@ export class RecapChoreographer {
       // 鎖住整個數量（數字＋單位）的最終寬度：單位緊貼著數字，旁邊的磚與文字不會被推動，
       // 數字從標籤那條邊往右長。跳完就解鎖，之後視窗縮放也不會被舊寬度卡住。
       const lock = node.parentElement ?? node;
-      lock.style.minInlineSize = `${Math.ceil(widths[index] ?? 0)}px`;
+      lock.style.minInlineSize = `${Math.ceil((widths[index] ?? 0) / cssZoom(lock))}px`;
       const text = format(from);
       node.textContent = text;
       // 用空 keyframes 的 Animation 當計時器：跟其他動畫共用時間軸，可暫停、可 seek、可取消。
