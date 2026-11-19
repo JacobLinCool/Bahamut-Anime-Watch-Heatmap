@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Bahamut Anime Watch Heatmap",
-  "description": "Adds a watch heatmap, seasonal analysis, and personal recaps to Bahamut Anime.",
+  "name": "__MSG_extName__",
+  "description": "__MSG_extDescription__",
+  "default_locale": "en",
   "version": "0.4.0",
   "icons": {
     "16": "icons/icon-16.png",

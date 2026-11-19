@@ -98,7 +98,7 @@ describe("analysis focus containment", () => {
     const open = { name: "open" } as unknown as HTMLElement;
     const main = fakeMainWithVeils([{ inert: true, panel: closing }, { inert: false, panel: open }]);
     expect(getAnalysisFocusTrapRoot(overlay, main, true)).toBe(open);
-    // 只剩淡出中的幕（理論上不會發生）時退回整個觀看誌，而不是困在 inert 的面板裡。
+    // 只剩淡出中的幕（理論上不會發生）時退回整個分析頁，而不是困在 inert 的面板裡。
     expect(getAnalysisFocusTrapRoot(overlay, fakeMainWithVeils([{ inert: true, panel: closing }]), true)).toBe(overlay);
   });
 

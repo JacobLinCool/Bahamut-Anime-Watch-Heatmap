@@ -164,7 +164,7 @@ export class AnalysisView {
     const header = element("header", "ani-analysis-header");
     const headerInner = element("div", "ani-analysis-header-inner");
     const brand = element("div", "ani-analysis-brand");
-    const heading = textElement("h2", "ani-analysis-title", "我的觀看誌");
+    const heading = textElement("h2", "ani-analysis-title", "我的追番回顧");
     heading.id = TITLE_ID;
     heading.tabIndex = -1;
     const subtitle = textElement("p", "ani-analysis-subtitle", "從觀看時間與每集上架時間，整理你的追番節奏與選擇。");
@@ -172,7 +172,7 @@ export class AnalysisView {
     brand.append(heading, subtitle);
 
     const surfaceNav = element("nav", "ani-analysis-surface-nav");
-    surfaceNav.setAttribute("aria-label", "觀看誌頁面");
+    surfaceNav.setAttribute("aria-label", "追番回顧頁面");
     surfaceNav.append(
       this.#surfaceButton("dashboard", "觀看總覽"),
       this.#surfaceButton("recap", "期間回顧")
@@ -188,7 +188,7 @@ export class AnalysisView {
       this.#toggleSettings();
     });
     const closeButton = createButton("ani-analysis-close", "×");
-    closeButton.setAttribute("aria-label", "關閉我的觀看誌");
+    closeButton.setAttribute("aria-label", "關閉追番回顧");
     closeButton.addEventListener("click", () => this.close());
     tools.append(settingsButton, closeButton);
     headerInner.append(brand, surfaceNav, tools);
@@ -814,7 +814,7 @@ export class AnalysisView {
 
     const scope = this.#scopeOptions.get(this.#selectedScopeKey);
     if (!scope || analysisScopeKey(scope) !== this.#selectedScopeKey) {
-      main.replaceChildren(errorPanel("這段期間暫時無法顯示", "請關閉後重新開啟觀看誌。"));
+      main.replaceChildren(errorPanel("這段期間暫時無法顯示", "請關閉後重新開啟追番回顧。"));
       this.#restoreFocusAfterRender(main, priorFocus, focusViewChanged, previousFocusViewKey !== "");
       return;
     }
@@ -1441,7 +1441,7 @@ export const analysisCss = `
 }
 .ani-analysis-overlay[data-phase="leaving"] { animation: ani-analysis-overlay-out var(--ani-dur-2) var(--ani-ease) both; }
 .ani-analysis-shell { position: relative; display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 100dvh; animation: ani-analysis-shell-in var(--ani-dur-3) var(--ani-ease-out) both; }
-/* 播放時整個觀看誌「關燈」：深色幕在 60ms 內就鋪滿（劇場的 clip-path 正從卡片展開蓋過亮處），
+/* 播放時整個分析頁「關燈」：深色幕在 60ms 內就鋪滿（劇場的 clip-path 正從卡片展開蓋過亮處），
    回到開場時也在 90ms 內把燈打開（劇場同時收回卡片）。兩個方向都不讓半透明的深淺兩層
    疊成一片灰。 */
 .ani-analysis-shell { isolation: isolate; }

@@ -1,6 +1,6 @@
-# Bahamut Anime Watch Heatmap
+# Bahamut Anime Watch Recap（動畫瘋追番回顧）
 
-Browser extension for `ani.gamer.com.tw` that turns the available year of watch history into a heatmap, explainable behavior analysis, and a presentation-style personal recap.
+Browser extension for `ani.gamer.com.tw` that turns the available year of watch history into a heatmap, explainable behavior analysis, and a presentation-style personal recap. It was previously named Bahamut Anime Watch Heatmap.
 
 ## Features
 

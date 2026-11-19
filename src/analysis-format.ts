@@ -19,7 +19,7 @@ const snapshotTimeFormatter = new Intl.DateTimeFormat("zh-TW", {
 });
 
 /**
- * 觀看誌裡的紀錄狀態：顯示的是先前保存的快照時，附上它截至的時間，
+ * 分析頁裡的紀錄狀態：顯示的是先前保存的快照時，附上它截至的時間，
  * 讓「近 30 日」「過去一年」看得出是到哪一刻為止。
  */
 export const formatHistoryNote = (note: string, savedSnapshotAt: Date | null): string =>

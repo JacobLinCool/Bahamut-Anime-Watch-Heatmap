@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "Bahamut Anime Watch Recap",
+    "description": "Extension name shown in the browser and the Chrome Web Store."
+  },
+  "extDescription": {
+    "message": "Turns your Bahamut Anime watch history into a heatmap, viewing analysis, and a personal recap.",
+    "description": "Short extension description, at most 132 characters."
+  }
+}

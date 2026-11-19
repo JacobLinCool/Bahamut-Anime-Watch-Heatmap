@@ -1,8 +1,8 @@
 # Privacy Policy
 
-Last updated: 2026-10-16
+Last updated: 2026-11-20
 
-Bahamut Anime Watch Heatmap is a browser extension that visualizes and analyzes watch history on Bahamut Anime (`ani.gamer.com.tw`).
+Bahamut Anime Watch Recap (formerly Bahamut Anime Watch Heatmap) is a browser extension that visualizes and analyzes watch history on Bahamut Anime (`ani.gamer.com.tw`).
 
 ## Data Access
 

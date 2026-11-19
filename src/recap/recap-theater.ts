@@ -92,7 +92,7 @@ export const recapZoneClickAction = (click: {
 /**
  * 回顧的常駐舞台：背景 field、封面 imprint、顆粒、進度與操作列只建一次，
  * 開場、每一章、資料依據與結尾海報都在同一個舞台上換「前景」。
- * 離開回顧（回總覽或關閉觀看誌）時由呼叫端 destroy。
+ * 離開回顧（回總覽或關閉分析頁）時由呼叫端 destroy。
  */
 export class RecapTheater {
   readonly root: HTMLElement;
@@ -544,7 +544,7 @@ export class RecapTheater {
     if (!view || view.mode !== "chapter" || view.evidence || event.defaultPrevented || event.button !== 0) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
-    // 只看 viewport 內的祖先：外層觀看誌本身就是 role="dialog"。
+    // 只看 viewport 內的祖先：外層分析頁本身就是 role="dialog"。
     const interactive = target.closest("button, a, input, select, textarea, label, summary, [role='dialog'], [data-rc-no-zone]");
     if (interactive && this.#viewport.contains(interactive)) return;
     // 雙擊的第二下：取消第一下排好的換章，讓瀏覽器選字。

@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "動畫瘋追番回顧",
+    "description": "Extension name shown in the browser and the Chrome Web Store."
+  },
+  "extDescription": {
+    "message": "把動畫瘋觀看紀錄整理成熱力圖、觀看分析和個人追番回顧。",
+    "description": "Short extension description, at most 132 characters."
+  }
+}

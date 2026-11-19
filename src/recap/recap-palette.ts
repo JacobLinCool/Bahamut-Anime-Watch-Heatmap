@@ -56,7 +56,7 @@ export const registerRecapProperties = (): void => {
     try {
       CSS.registerProperty(definition);
     } catch {
-      // 已註冊（重新開啟觀看誌，或頁面剛好用了同名屬性）：沿用現有定義。
+      // 已註冊（重新開啟分析頁，或頁面剛好用了同名屬性）：沿用現有定義。
     }
   }
 };
